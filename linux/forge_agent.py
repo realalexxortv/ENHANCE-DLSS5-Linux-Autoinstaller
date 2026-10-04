@@ -515,38 +515,6 @@ def skip_reason(api: str, bits: int | None, exe: str | None, anticheat: str | No
     return "Skipped: " + " ".join(parts)
 
 
-def find_cover(appid: str) -> str | None:
-    if not appid.isdigit():
-        return None
-    rels = [
-        os.path.join("appcache", "librarycache", appid, "library_600x900.jpg"),
-        os.path.join("appcache", "librarycache", appid, "library_600x900_2x.jpg"),
-        os.path.join("appcache", "librarycache", f"{appid}_library_600x900.jpg"),
-        os.path.join("appcache", "librarycache", appid, "header.jpg"),
-        os.path.join("appcache", "librarycache", f"{appid}_header.jpg"),
-    ]
-    grids = [f"{appid}p.jpg", f"{appid}p.png", f"{appid}p.jpeg"]
-    for root in steam_roots():
-        for rel in rels:
-            path = os.path.join(root, rel)
-            if os.path.isfile(path) and os.path.getsize(path) > 800:
-                return path
-        userdata = os.path.join(root, "userdata")
-        if not os.path.isdir(userdata):
-            continue
-        try:
-            users = os.listdir(userdata)
-        except OSError:
-            continue
-        for user in users:
-            grid = os.path.join(userdata, user, "config", "grid")
-            for name in grids:
-                path = os.path.join(grid, name)
-                if os.path.isfile(path) and os.path.getsize(path) > 800:
-                    return path
-    return None
-
-
 def game_record(appid: str, name: str, library: str, installdir: str, kind: str) -> dict | None:
     root = os.path.join(library, "steamapps", "common", installdir)
     if not os.path.isdir(root):
@@ -580,7 +548,6 @@ def game_record(appid: str, name: str, library: str, installdir: str, kind: str)
         "steamKind": kind,
         "unsupportedReason": reason,
         "skipReason": reason,
-        "cover": f"/cover/{appid}",
     }
 
 
@@ -1019,31 +986,6 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/health":
             self._json(200, {"ok": True, "name": "enhance", "version": VERSION, "port": PORT})
             return
-        if path.startswith("/cover/"):
-            appid = path[len("/cover/") :]
-            if not appid.isdigit():
-                self._json(404, {"error": "Not found"})
-                return
-            found = find_cover(appid)
-            if not found:
-                self.send_response(302)
-                self._cors()
-                self.send_header(
-                    "Location",
-                    f"https://cdn.cloudflare.steamstatic.com/steam/apps/{appid}/library_600x900.jpg",
-                )
-                self.end_headers()
-                return
-            data = open(found, "rb").read()
-            kind = "image/png" if found.lower().endswith(".png") else "image/jpeg"
-            self.send_response(200)
-            self._cors()
-            self.send_header("Content-Type", kind)
-            self.send_header("Content-Length", str(len(data)))
-            self.send_header("Cache-Control", "public, max-age=86400")
-            self.end_headers()
-            self.wfile.write(data)
-            return
         if path == "/api/games":
             self._json(200, scan_games())
             return
@@ -1202,6 +1144,11 @@ function visible() {
     return true;
   });
 }
+function coverSrc(appid) {
+  return /^[0-9]+$/.test(String(appid))
+    ? "https://cdn.cloudflare.steamstatic.com/steam/apps/" + appid + "/library_600x900.jpg"
+    : "";
+}
 function renderList() {
   const games = visible();
   if (!state.id && games[0]) state.id = games[0].appid;
@@ -1209,7 +1156,7 @@ function renderList() {
     const why = skipped(g) ? (g.skipReason || g.unsupportedReason || "Skipped") : "";
     const hard = why && g.api !== "unknown";
     return '<button class="card' + (hard ? " dim" : "") + '" role="option" data-id="' + g.appid + '" aria-selected="' + (g.appid === state.id) + '">' +
-      '<img alt="" src="/cover/' + g.appid + '" onerror="this.style.display=\'none\'"/>' +
+      '<img alt="" src="' + coverSrc(g.appid) + '" onerror="this.style.display=\'none\'"/>' +
       '<span class="badge">' + escapeHtml((g.api === "dx11" || g.api === "dx12") ? g.api.toUpperCase() : (g.api || "unknown")) + '</span>' +
       (g.installedByForge ? '<span class="badge right">Installed</span>' : '') +
       '<span class="shade"><span class="name">' + escapeHtml(g.name) + '</span>' +
@@ -1254,7 +1201,7 @@ function renderDetail() {
     d3d12: "DX12 only. Use this if the picture stays black but the ReShade overlay still opens with Home."
   };
   detailEl.innerHTML =
-    '<div class="row" style="align-items:flex-start"><img alt="" src="/cover/' + g.appid + '" style="width:72px;aspect-ratio:2/3;object-fit:cover;border-radius:8px" onerror="this.style.display=\'none\'"/>' +
+    '<div class="row" style="align-items:flex-start"><img alt="" src="' + coverSrc(g.appid) + '" style="width:72px;aspect-ratio:2/3;object-fit:cover;border-radius:8px" onerror="this.style.display=\'none\'"/>' +
     '<div><h2>' + escapeHtml(g.name) + '</h2>' +
     '<div class="pills" style="margin-top:8px">' + pills(g) + '</div></div></div>' +
     '<p class="mono" style="margin-top:10px">' + escapeHtml(g.installDir) + (g.exeRelative ? "\n" + escapeHtml(g.exeRelative) : "") + '</p>' +

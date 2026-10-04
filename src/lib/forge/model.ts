@@ -19,7 +19,6 @@ export type Game = {
   hook: Hook | null;
   steamKind: SteamKind;
   unsupportedReason: string | null;
-  cover?: string | null;
   skipReason?: string | null;
 };
 
@@ -244,12 +243,8 @@ export function skipReason(game: Game): string | null {
   return `Skipped: ${parts.join(" ")}`;
 }
 
-export function coverUrl(game: Game, live: boolean): string {
-  if (game.cover) {
-    if (live && game.cover.startsWith("/")) return `${AGENT_ORIGIN}${game.cover}`;
-    return game.cover;
-  }
-  return live ? `${AGENT_ORIGIN}/cover/${game.appid}` : `/covers/${game.appid}.jpg`;
+export function coverUrl(game: Game): string {
+  return `https://cdn.cloudflare.steamstatic.com/steam/apps/${game.appid}/library_600x900.jpg`;
 }
 
 export const HOOK_HELP: { hook: Hook; title: string; body: string }[] = [

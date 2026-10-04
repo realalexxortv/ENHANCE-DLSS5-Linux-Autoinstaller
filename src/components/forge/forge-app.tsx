@@ -342,7 +342,6 @@ export function ForgeApp() {
                 <CoverCard
                   key={game.appid}
                   game={game}
-                  live={mode === "live"}
                   selected={selected?.appid === game.appid}
                   onSelect={() => selectGame(game)}
                 />
@@ -357,7 +356,6 @@ export function ForgeApp() {
           {selected ? (
             <Detail
               game={selected}
-              live={mode === "live"}
               hook={hook}
               overwrite={overwrite}
               ack={ack}
@@ -385,12 +383,10 @@ export function ForgeApp() {
 
 function CoverCard({
   game,
-  live,
   selected,
   onSelect,
 }: {
   game: Game;
-  live: boolean;
   selected: boolean;
   onSelect: () => void;
 }) {
@@ -413,7 +409,7 @@ function CoverCard({
         </span>
       ) : (
         <img
-          src={coverUrl(game, live)}
+          src={coverUrl(game)}
           alt=""
           className={`absolute inset-0 h-full w-full object-cover ${hard ? "opacity-40" : ""}`}
           onError={() => setFailed(true)}
@@ -462,7 +458,6 @@ function Pills({ game }: { game: Game }) {
 
 function Detail({
   game,
-  live,
   hook,
   overwrite,
   ack,
@@ -480,7 +475,6 @@ function Detail({
   onCopy,
 }: {
   game: Game;
-  live: boolean;
   hook: Hook;
   overwrite: boolean;
   ack: boolean;
@@ -514,7 +508,7 @@ function Detail({
       <div className="flex gap-3">
         {coverFailed ? null : (
           <img
-            src={coverUrl(game, live)}
+            src={coverUrl(game)}
             alt=""
             className="cover-frame w-16 shrink-0 rounded-md object-cover"
             onError={() => setCoverFailed(true)}
