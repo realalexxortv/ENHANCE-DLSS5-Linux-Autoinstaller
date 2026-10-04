@@ -1327,15 +1327,76 @@ load();
 """
 
 
-def serve() -> None:
-    server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
-    url = f"http://127.0.0.1:{PORT}/"
-    print(f"ENHANCE is running at {url}", flush=True)
-    if os.environ.get("FORGE_NO_BROWSER") != "1":
-        import webbrowser
+def open_browser(url: str) -> bool:
+    import shutil
+    import subprocess
+    import webbrowser
 
-        webbrowser.open(url)
-    server.serve_forever()
+    try:
+        if webbrowser.open(url, new=1):
+            return True
+    except Exception:
+        pass
+    commands: list[list[str]] = []
+    xdg = shutil.which("xdg-open")
+    if xdg:
+        commands.append([xdg, url])
+    gio = shutil.which("gio")
+    if gio:
+        commands.append([gio, "open", url])
+    for name in ("kde-open", "firefox", "chromium", "google-chrome-stable", "google-chrome"):
+        path = shutil.which(name)
+        if path:
+            commands.append([path, url])
+    for argv in commands:
+        try:
+            subprocess.Popen(
+                argv,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            return True
+        except OSError:
+            continue
+    return False
+
+
+def tell_user(message: str) -> None:
+    import shutil
+    import subprocess
+
+    print(message, flush=True)
+    if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
+        return
+    for argv in (
+        ["kdialog", "--msgbox", message],
+        ["zenity", "--info", "--width", "460", "--text", message],
+        ["notify-send", "ENHANCE", message],
+    ):
+        if not shutil.which(argv[0]):
+            continue
+        subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        return
+
+
+def serve() -> None:
+    url = f"http://127.0.0.1:{PORT}/"
+    try:
+        server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
+    except OSError:
+        print(f"ENHANCE is already running at {url}", flush=True)
+        if os.environ.get("FORGE_NO_BROWSER") != "1" and not open_browser(url):
+            tell_user(f"ENHANCE is already running.\nOpen {url}")
+        return
+    print(f"ENHANCE is running at {url}", flush=True)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    if os.environ.get("FORGE_NO_BROWSER") != "1" and not open_browser(url):
+        tell_user(f"ENHANCE is running, but no browser opened.\nOpen {url}")
+    try:
+        threading.Event().wait()
+    except KeyboardInterrupt:
+        server.shutdown()
 
 
 def selftest() -> None:

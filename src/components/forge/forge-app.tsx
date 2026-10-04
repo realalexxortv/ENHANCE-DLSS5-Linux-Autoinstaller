@@ -286,8 +286,7 @@ export function ForgeApp() {
               </li>
               <li>
                 Works on Arch, CachyOS, Fedora, Debian, and other glibc systems that already have
-                python3. Flatpak Steam and Snap Steam are included. If it refuses to start because
-                FUSE is missing, run it with --appimage-extract-and-run.
+                python3. Flatpak Steam and Snap Steam are included. No FUSE and no root.
               </li>
             </ol>
             <a
@@ -299,8 +298,8 @@ export function ForgeApp() {
               Download ENHANCE-x86_64.AppImage
             </a>
             <p className="mt-3 text-sm text-subtle">
-              Mark it executable, then open it. No root. If the desktop says FUSE is not available,
-              launch it as ./ENHANCE-x86_64.AppImage --appimage-extract-and-run.
+              Mark it executable, then open it. A browser window lists the games Steam has
+              installed. No FUSE and no root. Needs python3, which is already on Arch and CachyOS.
             </p>
           </section>
         ) : null}
