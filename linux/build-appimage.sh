@@ -1,6 +1,7 @@
 #!/bin/sh
-# Build public/ENHANCE-x86_64.AppImage as a normal executable.
+# Build public/ENHANCE-linux-x86_64 as a normal executable.
 # It unpacks itself and starts python3. It does not need FUSE.
+# The file is not named .AppImage, so AppImageLauncher cannot open an old copy instead.
 set -eu
 ROOT="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)"
 WORK="$(mktemp -d)"
@@ -26,7 +27,7 @@ offset = __import__("os").path.getsize(sys.argv[1])
 open(sys.argv[2], "wb").write(struct.pack("<Q", offset) + b"ENHANCE1")
 PY
 
-OUT="$ROOT/public/ENHANCE-x86_64.AppImage"
+OUT="$ROOT/public/ENHANCE-linux-x86_64"
 cat "$WORK/launcher" "$WORK/payload.tar.xz" "$WORK/footer" > "$OUT"
 chmod 755 "$OUT"
 ls -lh "$OUT"

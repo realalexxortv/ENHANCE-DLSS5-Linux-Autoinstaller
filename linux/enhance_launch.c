@@ -75,19 +75,22 @@ static int read_footer(const char *path, uint64_t *off) {
     return 0;
 }
 
-static int stamp_matches(const char *stamp_path, uint64_t size) {
+static int stamp_matches(const char *stamp_path, uint64_t size, long long mtime) {
     FILE *file = fopen(stamp_path, "r");
     if (!file) return 0;
-    unsigned long long found = 0;
-    int ok = fscanf(file, "%llu", &found) == 1 && found == (unsigned long long)size;
+    unsigned long long found_size = 0;
+    long long found_mtime = 0;
+    int ok = fscanf(file, "%llu %lld", &found_size, &found_mtime) == 2
+        && found_size == (unsigned long long)size
+        && found_mtime == mtime;
     fclose(file);
     return ok;
 }
 
-static int write_stamp(const char *stamp_path, uint64_t size) {
+static int write_stamp(const char *stamp_path, uint64_t size, long long mtime) {
     FILE *file = fopen(stamp_path, "w");
     if (!file) return -1;
-    fprintf(file, "%llu\n", (unsigned long long)size);
+    fprintf(file, "%llu %lld\n", (unsigned long long)size, mtime);
     fclose(file);
     return 0;
 }
@@ -189,14 +192,14 @@ int main(void) {
         free(self);
         return 1;
     }
-    if (!stamp_matches(stamp, (uint64_t)st.st_size) || access(agent, R_OK) != 0) {
+    if (!stamp_matches(stamp, (uint64_t)st.st_size, (long long)st.st_mtime) || access(agent, R_OK) != 0) {
         if (mkdir_p(app) != 0 || extract_payload(self, off, app) != 0 || access(agent, R_OK) != 0) {
             show_error("ENHANCE needs python3, which Arch, CachyOS, Fedora, and Debian already include. Unpack failed.");
             free(self);
             return 1;
         }
         chmod(seven, 0755);
-        write_stamp(stamp, (uint64_t)st.st_size);
+        write_stamp(stamp, (uint64_t)st.st_size, (long long)st.st_mtime);
     }
     free(self);
     setenv("FORGE_BUNDLED_7Z", seven, 1);

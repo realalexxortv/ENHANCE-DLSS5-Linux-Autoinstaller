@@ -309,7 +309,7 @@ export function compatibilityNotes(game: Game, hook: Hook): string[] {
     "In the game, press Home. Open Add-ons and turn on RenoDX DLSS / Neural Rendering. Games that did not ship DLSS need Hook Method set to On Present and Require DLSS set to Off.",
     "Single-player only. Easy Anti-Cheat, BattlEye, Vanguard, and VAC can refuse to start or ban the account. ENHANCE will not install those quietly.",
     store,
-    "No root. The AppImage needs python3, which Arch, CachyOS, Fedora, and Debian already have. The first install downloads ReShade, Lecram's DLSS 5 add-on, and the NVIDIA files. If 7-Zip is not already on the system, the AppImage uses the copy bundled inside it.",
+    "No root. The Linux program needs python3, which Arch, CachyOS, Fedora, and Debian already have. The first install downloads ReShade, Lecram's DLSS 5 add-on, and the NVIDIA files. If 7-Zip is not already on the system, the program uses the copy bundled inside it.",
   ];
 }
 

@@ -19,6 +19,7 @@ import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 VERSION = "1.0.0"
+BUILD = "20261004.3"
 PORT = int(os.environ.get("ENHANCE_PORT") or os.environ.get("FORGE_PORT") or "4775")
 MARKER_NAME = ".enhance-dlss5.json"
 LEGACY_MARKER = ".forge-dlss5.json"
@@ -984,7 +985,7 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
         if path == "/api/health":
-            self._json(200, {"ok": True, "name": "enhance", "version": VERSION, "port": PORT})
+            self._json(200, {"ok": True, "name": "enhance", "version": VERSION, "build": BUILD, "port": PORT})
             return
         if path == "/api/games":
             self._json(200, scan_games())
@@ -1327,14 +1328,83 @@ def tell_user(message: str) -> None:
         return
 
 
-def serve() -> None:
-    url = f"http://127.0.0.1:{PORT}/"
+def read_health(port: int) -> dict | None:
     try:
-        server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=0.5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def stop_other_copies() -> None:
+    import signal
+
+    me = os.getpid()
+    pids: list[int] = []
+    try:
+        names = os.listdir("/proc")
     except OSError:
+        return
+    for name in names:
+        if not name.isdigit():
+            continue
+        pid = int(name)
+        if pid == me:
+            continue
+        try:
+            raw = open(f"/proc/{pid}/cmdline", "rb").read()
+        except OSError:
+            continue
+        if not any(part.endswith(b"forge_agent.py") for part in raw.split(b"\x00") if part):
+            continue
+        pids.append(pid)
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+    deadline = time.time() + 2
+    while time.time() < deadline and pids:
+        alive: list[int] = []
+        for pid in pids:
+            try:
+                os.kill(pid, 0)
+            except OSError:
+                continue
+            alive.append(pid)
+        pids = alive
+        if pids:
+            time.sleep(0.1)
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+
+
+def serve() -> None:
+    url = f"http://127.0.0.1:{PORT}/?b={BUILD}"
+    health = read_health(PORT)
+    if health and health.get("name") == "enhance" and health.get("build") == BUILD:
         print(f"ENHANCE is already running at {url}", flush=True)
         if os.environ.get("FORGE_NO_BROWSER") != "1" and not open_browser(url):
             tell_user(f"ENHANCE is already running.\nOpen {url}")
+        return
+    if health is not None:
+        print("Closing an older Forge or ENHANCE window.", flush=True)
+        stop_other_copies()
+        time.sleep(0.2)
+    try:
+        server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
+    except OSError:
+        message = (
+            "An older Forge window is still using this computer and could not be closed. "
+            "Quit that window, then open ENHANCE again."
+        )
+        print(message, flush=True)
+        if os.environ.get("FORGE_NO_BROWSER") != "1":
+            tell_user(message)
         return
     print(f"ENHANCE is running at {url}", flush=True)
     threading.Thread(target=server.serve_forever, daemon=True).start()

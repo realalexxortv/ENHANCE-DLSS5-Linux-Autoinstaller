@@ -279,10 +279,15 @@ export function ForgeApp() {
           <section className="mt-4 rounded-xl border border-line bg-surface p-4 sm:p-5">
             <h2 className="text-lg font-semibold">Run ENHANCE on Linux</h2>
             <ol className="mt-3 list-decimal space-y-2 pl-5 text-sm text-muted">
-              <li>Download the AppImage. It is the app, not an installer that needs root.</li>
+              <li>Download the Linux program. It is the app, not an installer that needs root.</li>
               <li>
                 In the file manager, open Properties and allow executing the file, then open it.
-                A browser window lists the games Steam has installed.
+                It replaces an older Forge window if one is still open, then lists the games Steam
+                has installed.
+              </li>
+              <li>
+                The page is your browser. A website by itself cannot see your Steam library or write
+                the hook into a game folder, so this program has to run on the computer.
               </li>
               <li>
                 Works on Arch, CachyOS, Fedora, Debian, and other glibc systems that already have
@@ -290,16 +295,16 @@ export function ForgeApp() {
               </li>
             </ol>
             <a
-              href="/ENHANCE-x86_64.AppImage"
-              download="ENHANCE-x86_64.AppImage"
+              href="/ENHANCE-linux-x86_64"
+              download="ENHANCE-linux-x86_64"
               className="mt-4 inline-flex h-11 items-center gap-2 rounded-full bg-accent px-4 text-sm font-semibold text-accent-fg"
             >
               <Download className="size-4" aria-hidden="true" />
-              Download ENHANCE-x86_64.AppImage
+              Download ENHANCE-linux-x86_64
             </a>
             <p className="mt-3 text-sm text-subtle">
-              Mark it executable, then open it. A browser window lists the games Steam has
-              installed. No FUSE and no root. Needs python3, which is already on Arch and CachyOS.
+              Do not open the old AppImage. That name was being handed back to the old Forge copy.
+              Mark this file executable, then open it.
             </p>
           </section>
         ) : null}
