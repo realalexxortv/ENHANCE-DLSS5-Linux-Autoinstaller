@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import tarfile
 import tempfile
@@ -19,7 +20,7 @@ import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 VERSION = "1.0.0"
-BUILD = "20261004.3"
+BUILD = "20261004.4"
 PORT = int(os.environ.get("ENHANCE_PORT") or os.environ.get("FORGE_PORT") or "4775")
 MARKER_NAME = ".enhance-dlss5.json"
 LEGACY_MARKER = ".forge-dlss5.json"
@@ -350,31 +351,236 @@ def steam_roots() -> list[str]:
     return found
 
 
-def libraries_for(root: str) -> list[str]:
-    libs = [root]
-    vdf_path = os.path.join(root, "steamapps", "libraryfolders.vdf")
-    if not os.path.isfile(vdf_path):
-        vdf_path = os.path.join(root, "steamapps", "libraryfolders.vdf")
+def paths_from_library_vdf(vdf_path: str) -> list[str]:
     try:
         text = open(vdf_path, encoding="utf-8", errors="replace").read()
     except OSError:
-        return libs
+        return []
     data = parse_vdf(text)
     block = data.get("libraryfolders") or data.get("LibraryFolders") or {}
     if not isinstance(block, dict):
-        return libs
+        return []
+    paths: list[str] = []
     for key, value in block.items():
         path = None
         if isinstance(value, dict):
-            path = value.get("path")
+            path = value.get("path") or value.get("Path")
         elif isinstance(value, str) and key not in {"TimeNextStatsReport", "ContentStatsID"}:
             path = value
-        if not path:
+        if isinstance(path, str) and path.strip():
+            paths.append(path.strip())
+    return paths
+
+
+def base_install_folders(root: str) -> list[str]:
+    cfg = os.path.join(root, "config", "config.vdf")
+    try:
+        text = open(cfg, encoding="utf-8", errors="replace").read()
+    except OSError:
+        return []
+    return re.findall(r'"BaseInstallFolder_\d+"\s+"([^"]+)"', text)
+
+
+def library_root_from(path: str, require_games: bool = False) -> str | None:
+    if not path:
+        return None
+    raw = os.path.expanduser(path.strip().strip('"').rstrip("/\\"))
+    if not raw:
+        return None
+    try:
+        raw = os.path.realpath(raw)
+    except OSError:
+        return None
+    if os.path.basename(raw).lower() == "steamapps":
+        steamapps = raw
+        root = os.path.dirname(raw)
+    else:
+        root = raw
+        steamapps = os.path.join(raw, "steamapps")
+    if not os.path.isdir(steamapps) or not os.path.isdir(root):
+        return None
+    if require_games and not has_manifests(steamapps) and not os.path.isfile(os.path.join(steamapps, "libraryfolder.vdf")):
+        return None
+    return root
+
+
+def has_manifests(steamapps: str) -> bool:
+    try:
+        names = os.listdir(steamapps)
+    except OSError:
+        return False
+    return any(name.startswith("appmanifest_") and name.endswith(".acf") for name in names)
+
+
+def decode_mount_path(raw: str) -> str:
+    out: list[str] = []
+    i = 0
+    while i < len(raw):
+        if raw[i] == "\\" and i + 3 < len(raw) and all(c in "01234567" for c in raw[i + 1 : i + 4]):
+            out.append(chr(int(raw[i + 1 : i + 4], 8)))
+            i += 4
+        else:
+            out.append(raw[i])
+            i += 1
+    return "".join(out)
+
+
+_SKIP_FS = {
+    "proc", "sysfs", "devtmpfs", "devpts", "tmpfs", "cgroup", "cgroup2",
+    "overlay", "squashfs", "ramfs", "securityfs", "pstore", "bpf", "tracefs",
+    "debugfs", "configfs", "fusectl", "mqueue", "hugetlbfs", "autofs",
+    "binfmt_misc", "rpc_pipefs", "nsfs", "efivarfs",
+}
+
+
+def mounted_partitions() -> list[str]:
+    try:
+        text = open("/proc/mounts", encoding="utf-8", errors="replace").read()
+    except OSError:
+        return []
+    points: list[str] = []
+    seen: set[str] = set()
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) < 3:
             continue
-        path = os.path.realpath(os.path.expanduser(path))
-        if os.path.isdir(os.path.join(path, "steamapps")) and path not in libs:
-            libs.append(path)
-    return libs
+        fstype = parts[2]
+        if fstype in _SKIP_FS or fstype.startswith("fuse.portal") or fstype.startswith("fuse.gvfs"):
+            continue
+        mount = decode_mount_path(parts[1])
+        if not mount.startswith("/"):
+            continue
+        if mount in {"/", "/boot", "/boot/efi", "/efi"}:
+            continue
+        if mount.startswith(("/proc", "/sys", "/dev", "/snap", "/run/snapd", "/var/lib/docker", "/var/lib/flatpak", "/run/user")):
+            continue
+        if mount in seen or not os.path.isdir(mount):
+            continue
+        seen.add(mount)
+        points.append(mount)
+    return points
+
+
+def resolve_recorded_library(raw: str) -> str | None:
+    direct = library_root_from(raw, require_games=False)
+    if direct:
+        return direct
+    expanded = os.path.expanduser(raw.strip().strip('"').rstrip("/\\"))
+    parts = [part for part in re.split(r"[\\/]", expanded) if part not in {"", ".", ".."}]
+    if parts and len(parts[0]) == 2 and parts[0][1] == ":":
+        parts = parts[1:]
+    tail = parts[-2:] if len(parts) >= 2 else parts[-1:]
+    if not tail:
+        return None
+    for mount in mounted_partitions():
+        for size in range(len(tail), 0, -1):
+            guess = os.path.join(mount, *tail[-size:])
+            found = library_root_from(guess, require_games=False)
+            if found:
+                return found
+    return None
+
+
+def home_library_hints() -> list[str]:
+    home = os.path.expanduser("~")
+    names = (
+        "SteamLibrary",
+        "Steam",
+        "steamapps",
+        "Games",
+        "games",
+        os.path.join("Games", "SteamLibrary"),
+        os.path.join("games", "SteamLibrary"),
+        os.path.join("Games", "Steam"),
+        os.path.join("games", "Steam"),
+    )
+    return [os.path.join(home, name) for name in names]
+
+
+def probe_mount(mount: str) -> list[str]:
+    found: list[str] = []
+    seen: set[str] = set()
+
+    def consider(path: str) -> None:
+        root = library_root_from(path, require_games=True)
+        if root and root not in seen:
+            seen.add(root)
+            found.append(root)
+
+    consider(mount)
+    try:
+        names = os.listdir(mount)
+    except OSError:
+        return found
+    for name in names:
+        if name.startswith(".") or name == "lost+found":
+            continue
+        child = os.path.join(mount, name)
+        if not os.path.isdir(child):
+            continue
+        consider(child)
+        low = name.lower()
+        if "steam" not in low and "game" not in low:
+            continue
+        try:
+            inner = os.listdir(child)
+        except OSError:
+            continue
+        for sub in inner:
+            if sub.startswith("."):
+                continue
+            nested = os.path.join(child, sub)
+            if os.path.isdir(nested):
+                consider(nested)
+    return found
+
+
+def discover_libraries(roots: list[str]) -> tuple[list[str], list[str]]:
+    ordered: list[str] = []
+    seen: set[str] = set()
+    unresolved: list[str] = []
+
+    def add(path: str | None) -> None:
+        if not path:
+            return
+        try:
+            real = os.path.realpath(path)
+        except OSError:
+            return
+        if real in seen or not os.path.isdir(os.path.join(real, "steamapps")):
+            return
+        seen.add(real)
+        ordered.append(real)
+
+    recorded: list[str] = []
+    for root in roots:
+        add(library_root_from(root, require_games=False) or root)
+        recorded.extend(paths_from_library_vdf(os.path.join(root, "steamapps", "libraryfolders.vdf")))
+        recorded.extend(paths_from_library_vdf(os.path.join(root, "config", "libraryfolders.vdf")))
+        recorded.extend(base_install_folders(root))
+    for raw in recorded:
+        resolved = resolve_recorded_library(raw)
+        if resolved:
+            add(resolved)
+        else:
+            unresolved.append(raw)
+    for hint in home_library_hints():
+        add(library_root_from(hint, require_games=True))
+    for mount in mounted_partitions():
+        for found in probe_mount(mount):
+            add(found)
+    found_names = {os.path.basename(path).lower() for path in ordered}
+    warnings: list[str] = []
+    warned: set[str] = set()
+    for raw in unresolved:
+        tail = os.path.basename(raw.rstrip("/\\")).lower()
+        if tail and tail in found_names:
+            continue
+        if raw in warned:
+            continue
+        warned.add(raw)
+        warnings.append(f"Steam lists a library at {raw}, but that folder is not available.")
+    return ordered, warnings
 
 
 def _walk_limited(root: str, max_depth: int):
@@ -554,58 +760,58 @@ def game_record(appid: str, name: str, library: str, installdir: str, kind: str)
 
 def scan_games() -> dict:
     roots = steam_roots()
-    warnings: list[str] = []
+    libraries, warnings = discover_libraries(roots)
     games: list[dict] = []
     seen: set[str] = set()
-    if not roots:
+    if not roots and not libraries:
         warnings.append(
-            "No Steam library found. Checked the native, Flatpak, and Snap locations."
+            "No Steam library found. Checked the native, Flatpak, and Snap locations, and other mounted partitions."
         )
         return {"games": [], "roots": [], "warnings": warnings}
-    for root in roots:
-        kind = steam_kind(root)
-        for library in libraries_for(root):
-            steamapps = os.path.join(library, "steamapps")
-            if not os.path.isdir(steamapps):
+    for library in libraries:
+        kind = steam_kind(library)
+        steamapps = os.path.join(library, "steamapps")
+        if not os.path.isdir(steamapps):
+            continue
+        try:
+            names = os.listdir(steamapps)
+        except OSError:
+            warnings.append(f"Could not read the Steam library at {library}.")
+            continue
+        for fn in names:
+            if not (fn.startswith("appmanifest_") and fn.endswith(".acf")):
+                continue
+            appid = fn[len("appmanifest_") : -len(".acf")]
+            if appid in SKIP_APPIDS or appid in seen:
                 continue
             try:
-                names = os.listdir(steamapps)
+                text = open(os.path.join(steamapps, fn), encoding="utf-8", errors="replace").read()
             except OSError:
                 continue
-            for fn in names:
-                if not (fn.startswith("appmanifest_") and fn.endswith(".acf")):
-                    continue
-                appid = fn[len("appmanifest_") : -len(".acf")]
-                if appid in SKIP_APPIDS or appid in seen:
-                    continue
-                try:
-                    text = open(os.path.join(steamapps, fn), encoding="utf-8", errors="replace").read()
-                except OSError:
-                    continue
-                data = parse_vdf(text)
-                state = data.get("AppState") or data.get("appstate") or {}
-                if not isinstance(state, dict):
-                    continue
-                name = state.get("name") or state.get("Name") or appid
-                if not isinstance(name, str):
-                    continue
-                low = name.lower()
-                if low.startswith("proton ") or "steam linux runtime" in low or "steamworks common" in low:
-                    continue
+            data = parse_vdf(text)
+            state = data.get("AppState") or data.get("appstate") or {}
+            if not isinstance(state, dict):
+                continue
+            name = state.get("name") or state.get("Name") or appid
+            if not isinstance(name, str):
+                continue
+            low = name.lower()
+            if low.startswith("proton ") or "steam linux runtime" in low or "steamworks common" in low:
+                continue
+            flags = 0
+            try:
+                flags = int(state.get("StateFlags") or state.get("stateflags") or "0")
+            except ValueError:
                 flags = 0
-                try:
-                    flags = int(state.get("StateFlags") or state.get("stateflags") or "0")
-                except ValueError:
-                    flags = 0
-                if flags and (flags & 4) == 0:
-                    continue
-                installdir = state.get("installdir") or state.get("InstallDir")
-                if not isinstance(installdir, str) or not installdir:
-                    continue
-                seen.add(appid)
-                record = game_record(appid, name, library, installdir, steam_kind(library) if library != root else kind)
-                if record:
-                    games.append(record)
+            if flags and (flags & 4) == 0:
+                continue
+            installdir = state.get("installdir") or state.get("InstallDir")
+            if not isinstance(installdir, str) or not installdir:
+                continue
+            seen.add(appid)
+            record = game_record(appid, name, library, installdir, kind)
+            if record:
+                games.append(record)
     games.sort(key=lambda g: g["name"].lower())
     return {"games": games, "roots": roots, "warnings": warnings}
 
@@ -1154,15 +1360,11 @@ function renderList() {
   const games = visible();
   if (!state.id && games[0]) state.id = games[0].appid;
   listEl.innerHTML = games.map(g => {
-    const why = skipped(g) ? (g.skipReason || g.unsupportedReason || "Skipped") : "";
-    const hard = why && g.api !== "unknown";
-    return '<button class="card' + (hard ? " dim" : "") + '" role="option" data-id="' + g.appid + '" aria-selected="' + (g.appid === state.id) + '">' +
+    return '<button class="card" role="option" data-id="' + g.appid + '" aria-selected="' + (g.appid === state.id) + '">' +
       '<img alt="" src="' + coverSrc(g.appid) + '" onerror="this.style.display=\'none\'"/>' +
       '<span class="badge">' + escapeHtml((g.api === "dx11" || g.api === "dx12") ? g.api.toUpperCase() : (g.api || "unknown")) + '</span>' +
       (g.installedByForge ? '<span class="badge right">Installed</span>' : '') +
-      '<span class="shade"><span class="name">' + escapeHtml(g.name) + '</span>' +
-      (why ? '<span class="reason">' + escapeHtml(why) + '</span>' : '<span class="meta">' + (g.bits ? g.bits + "-bit" : "") + '</span>') +
-      '</span></button>';
+      '<span class="shade"><span class="name">' + escapeHtml(g.name) + '</span></span></button>';
   }).join("") || '<p class="sub">No games in this filter.</p>';
   listEl.querySelectorAll(".card").forEach(btn => btn.onclick = () => { state.id = btn.dataset.id; state.log = []; state.ack = false; render(); });
 }
@@ -1483,6 +1685,25 @@ def selftest() -> None:
     assert info and info["bits"] == 64, info
     assert classify_api(info["imports"]) == "dx12", info
     assert launch_options("dxgi").startswith("WINEDLLOVERRIDES=")
+
+    base = tempfile.mkdtemp()
+    root = os.path.join(base, "Steam")
+    other = os.path.join(base, "SteamLibrary")
+    os.makedirs(os.path.join(root, "steamapps"))
+    os.makedirs(os.path.join(other, "steamapps", "common", "Demo"))
+    open(os.path.join(other, "steamapps", "appmanifest_10.acf"), "w", encoding="utf-8").write(
+        '"AppState" { "appid" "10" "name" "Demo" "StateFlags" "4" "installdir" "Demo" }\n'
+    )
+    os.makedirs(os.path.join(root, "config"), exist_ok=True)
+    open(os.path.join(root, "steamapps", "libraryfolders.vdf"), "w", encoding="utf-8").write(
+        '"libraryfolders"\n{\n"0"\n{\n"path" "%s"\n}\n"1"\n{\n"path" "%s"\n}\n}\n' % (root, other)
+    )
+    open(os.path.join(root, "config", "config.vdf"), "w", encoding="utf-8").write(
+        '"InstallConfigStore" { "Software" { "Valve" { "Steam" { "BaseInstallFolder_1" "%s" } } } }\n' % other
+    )
+    found, warns = discover_libraries([root])
+    assert other in found, (found, warns)
+    assert root in found, found
     print("selftest ok")
 
 

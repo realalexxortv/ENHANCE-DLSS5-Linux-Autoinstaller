@@ -396,8 +396,6 @@ function CoverCard({
   onSelect: () => void;
 }) {
   const [failed, setFailed] = useState(false);
-  const why = skipReason(game);
-  const hard = Boolean(why) && game.api !== "unknown";
   return (
     <button
       type="button"
@@ -416,7 +414,7 @@ function CoverCard({
         <img
           src={coverUrl(game)}
           alt=""
-          className={`absolute inset-0 h-full w-full object-cover ${hard ? "opacity-40" : ""}`}
+          className="absolute inset-0 h-full w-full object-cover"
           onError={() => setFailed(true)}
         />
       )}
@@ -427,12 +425,7 @@ function CoverCard({
         <span className="absolute top-2 right-2 rounded-full bg-bg/80 px-2 py-0.5 text-xs text-ok">Installed</span>
       ) : null}
       <span className="absolute inset-x-0 bottom-0 bg-bg/90 px-2.5 py-2">
-        <span className="block text-sm leading-tight font-semibold">{game.name}</span>
-        {why ? (
-          <span className="mt-1 line-clamp-4 block text-xs leading-snug text-warn">{why}</span>
-        ) : (
-          <span className="mt-1 block text-xs text-muted">{game.bits ? `${game.bits}-bit` : "64-bit"}</span>
-        )}
+        <span className="line-clamp-2 block text-sm leading-tight font-semibold">{game.name}</span>
       </span>
     </button>
   );
