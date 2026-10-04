@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Forge local agent. Scans Steam and installs the DLSS 5 pack for Proton.
+"""ENHANCE local agent. Scans Steam and installs the DLSS 5 pack for Proton.
 
 Stdlib only. Binds to 127.0.0.1. A browser page cannot choose the destination
 path: install looks the game up again from the Steam libraries.
@@ -19,22 +19,26 @@ import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 VERSION = "1.0.0"
-PORT = int(os.environ.get("FORGE_PORT", "4775"))
+PORT = int(os.environ.get("ENHANCE_PORT") or os.environ.get("FORGE_PORT") or "4775")
+MARKER_NAME = ".enhance-dlss5.json"
+LEGACY_MARKER = ".forge-dlss5.json"
+BACKUP_DIRNAME = ".enhance-dlss5-backup"
 
 RESHAPE_URL = "https://reshade.me/downloads/ReShade_Setup_6.8.0_Addon.exe"
-SF_URL = (
+ADDON_URL = (
     "https://github.com/RankFTW/rhi-repo/releases/download/"
-    "renodx-dlss-SF-26.0928.0205/renodx-dlss_SF_26.0928.0205.zip"
+    "renodx-dlss5-7.0.0-rc8/renodx-dlss5_7.0.0-rc8.zip"
 )
 NR_URL = (
     "https://github.com/RankFTW/rhi-repo/releases/download/"
-    "dlssnr-310.8.SF-v2/nvngx_dlssnr_310.8.SF-v2.zip"
+    "dlssnr-310.8.Lecram/nvngx_dlssnr_310.8.Lecram.zip"
 )
 SL_URL = "https://github.com/yumlevi/renodx-dlss-installer/releases/download/latest/streamline.zip"
 SEVEN_URL = "https://github.com/ip7z/7zip/releases/download/26.03/7z2603-linux-x64.tar.xz"
 
-SF_LABEL = "ShortFuse renodx-dlss SF 26.0928.0205"
-NR_LABEL = "NVIDIA nvngx_dlssnr 310.8.SF-v2"
+ADDON_NAME = "renodx-dlss5.addon64"
+ADDON_LABEL = "DLSS 5 add-on v7.0.0-rc8 (renodx-dlss5.addon64)"
+NR_LABEL = "Lecram nvngx_dlssnr 310.8.Lecram"
 SL_NAMES = [
     "nvngx_dlss.dll",
     "nvngx_dlssg.dll",
@@ -87,8 +91,8 @@ JOB_LOCK = threading.Lock()
 
 
 def home_dir() -> str:
-    return os.environ.get("FORGE_HOME") or os.path.join(
-        os.path.expanduser("~"), ".local", "share", "forge-dlss5"
+    return os.environ.get("ENHANCE_HOME") or os.environ.get("FORGE_HOME") or os.path.join(
+        os.path.expanduser("~"), ".local", "share", "enhance-dlss5"
     )
 
 
@@ -474,6 +478,75 @@ def choose_exe(game_root: str, installdir: str) -> tuple[str | None, dict | None
     return best_path, best_info
 
 
+def load_marker(folder: str) -> tuple[str | None, dict | None]:
+    for name in (MARKER_NAME, LEGACY_MARKER):
+        path = os.path.join(folder, name)
+        if not os.path.isfile(path):
+            continue
+        try:
+            data = json.load(open(path, encoding="utf-8"))
+            return path, data if isinstance(data, dict) else {"installed": True}
+        except (OSError, json.JSONDecodeError):
+            return path, {"installed": True}
+    return None, None
+
+
+def skip_reason(api: str, bits: int | None, exe: str | None, anticheat: str | None) -> str | None:
+    parts: list[str] = []
+    if bits == 32:
+        parts.append("32-bit executable. Only 64-bit games are packed.")
+    elif api == "dx9":
+        parts.append("DirectX 9. Only DX11 and DX12 are hooked.")
+    elif api == "vulkan":
+        parts.append("Vulkan. Only DX11 and DX12 are hooked.")
+    elif api == "opengl":
+        parts.append("OpenGL. Only DX11 and DX12 are hooked.")
+    elif not exe:
+        parts.append("No Windows executable in the install folder.")
+    elif api == "unknown":
+        parts.append("The executable does not import d3d11 or d3d12. You can still force a DX11 or DX12 hook.")
+    if anticheat:
+        label = {"easyanticheat": "Easy Anti-Cheat", "battleye": "BattlEye", "vac": "VAC"}.get(anticheat, anticheat)
+        parts.append(f"{label} is in this folder. The hook can make the game refuse to start or ban the account.")
+    if not parts:
+        return None
+    if api == "unknown" and not anticheat:
+        return parts[0]
+    return "Skipped: " + " ".join(parts)
+
+
+def find_cover(appid: str) -> str | None:
+    if not appid.isdigit():
+        return None
+    rels = [
+        os.path.join("appcache", "librarycache", appid, "library_600x900.jpg"),
+        os.path.join("appcache", "librarycache", appid, "library_600x900_2x.jpg"),
+        os.path.join("appcache", "librarycache", f"{appid}_library_600x900.jpg"),
+        os.path.join("appcache", "librarycache", appid, "header.jpg"),
+        os.path.join("appcache", "librarycache", f"{appid}_header.jpg"),
+    ]
+    grids = [f"{appid}p.jpg", f"{appid}p.png", f"{appid}p.jpeg"]
+    for root in steam_roots():
+        for rel in rels:
+            path = os.path.join(root, rel)
+            if os.path.isfile(path) and os.path.getsize(path) > 800:
+                return path
+        userdata = os.path.join(root, "userdata")
+        if not os.path.isdir(userdata):
+            continue
+        try:
+            users = os.listdir(userdata)
+        except OSError:
+            continue
+        for user in users:
+            grid = os.path.join(userdata, user, "config", "grid")
+            for name in grids:
+                path = os.path.join(grid, name)
+                if os.path.isfile(path) and os.path.getsize(path) > 800:
+                    return path
+    return None
+
+
 def game_record(appid: str, name: str, library: str, installdir: str, kind: str) -> dict | None:
     root = os.path.join(library, "steamapps", "common", installdir)
     if not os.path.isdir(root):
@@ -487,23 +560,9 @@ def game_record(appid: str, name: str, library: str, installdir: str, kind: str)
     dlss = find_file(root, {"nvngx_dlss.dll"})
     marker = None
     if exe:
-        marker_path = os.path.join(os.path.dirname(exe), ".forge-dlss5.json")
-        if os.path.isfile(marker_path):
-            try:
-                marker = json.load(open(marker_path, encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                marker = {"installed": True}
-    reason = None
-    if bits == 32:
-        reason = "32-bit executable. This version only installs 64-bit DX11 and DX12 games."
-    elif api in {"vulkan", "opengl"}:
-        reason = f"Detected {api}. Vulkan and OpenGL are not hooked by this pack."
-    elif api == "dx9":
-        reason = "Detected DirectX 9. DX11 and DX12 only for now."
-    elif api == "unknown":
-        reason = "Could not see d3d11.dll or d3d12.dll in the executable. You can still force DX11 or DX12."
-    elif not exe:
-        reason = "No Windows executable found in the install folder."
+        _path, marker = load_marker(os.path.dirname(exe))
+    ac = detect_anticheat(root)
+    reason = skip_reason(api, bits, exe, ac)
     return {
         "appid": appid,
         "name": name,
@@ -515,11 +574,13 @@ def game_record(appid: str, name: str, library: str, installdir: str, kind: str)
         "bits": bits,
         "hasDlss": bool(dlss),
         "dlssPath": dlss,
-        "anticheat": detect_anticheat(root),
+        "anticheat": ac,
         "installedByForge": bool(marker),
         "hook": (marker or {}).get("hook"),
         "steamKind": kind,
         "unsupportedReason": reason,
+        "skipReason": reason,
+        "cover": f"/cover/{appid}",
     }
 
 
@@ -582,7 +643,7 @@ def scan_games() -> dict:
 
 
 def _urlretrieve(url: str, dest: str) -> None:
-    req = urllib.request.Request(url, headers={"User-Agent": "ForgeDLSS5/1.0"})
+    req = urllib.request.Request(url, headers={"User-Agent": "ENHANCE/1.0"})
     with urllib.request.urlopen(req, timeout=120) as response, open(dest, "wb") as out:
         while True:
             chunk = response.read(1024 * 256)
@@ -604,6 +665,16 @@ def cached_download(url: str, filename: str, label: str) -> str:
 
 
 def ensure_7z() -> str:
+    env_bundled = os.environ.get("FORGE_BUNDLED_7Z") or ""
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        env_bundled,
+        os.path.join(here, "7zz"),
+        os.path.join(here, "..", "bin", "7zz"),
+    ]
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
     for name in ("7z", "7zz", "7za"):
         found = shutil.which(name)
         if found:
@@ -684,7 +755,7 @@ def _backup(folder: str, filename: str) -> None:
     if not os.path.isfile(src):
         return
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    dest_dir = os.path.join(folder, ".forge-dlss5-backup", stamp)
+    dest_dir = os.path.join(folder, BACKUP_DIRNAME, stamp)
     os.makedirs(dest_dir, exist_ok=True)
     shutil.copy2(src, os.path.join(dest_dir, filename))
 
@@ -699,7 +770,7 @@ def _place(src: str, folder: str, filename: str, placed: list[str]) -> None:
 
 def write_ini(folder: str) -> None:
     path = os.path.join(folder, "ReShade.ini")
-    addon_line = "LoadFromDllMain=renodx-dlss.addon64"
+    addon_line = "LoadFromDllMain=renodx-dlss5.addon64"
     if not os.path.isfile(path):
         text = (
             "[GENERAL]\n"
@@ -750,7 +821,7 @@ def write_ini(folder: str) -> None:
         out.append(addon_line)
     with open(path, "w", encoding="utf-8", newline="\n") as handle:
         handle.write("\n".join(out).rstrip() + "\n")
-    log_line("Updated ReShade.ini (LoadFromDllMain=renodx-dlss.addon64)")
+    log_line("Updated ReShade.ini (LoadFromDllMain=renodx-dlss5.addon64)")
 
 
 def find_game(appid: str) -> dict:
@@ -785,19 +856,19 @@ def install_game(appid: str, hook: str, overwrite: bool, api_override: str | Non
     log_line(f"{game['name']} · {api.upper()} · 64-bit")
     log_line(f"Executable folder: {folder}")
 
-    local_addon = os.path.join(payload_dir(), "renodx-dlss.addon64")
+    local_addon = os.path.join(payload_dir(), ADDON_NAME)
     local_nr = os.path.join(payload_dir(), "nvngx_dlssnr.dll")
     if os.path.isfile(local_addon):
         addon = local_addon
-        log_line("Using your local ShortFuse add-on from the payload folder")
+        log_line("Using your local DLSS 5 add-on from the payload folder")
     else:
-        zpath = cached_download(SF_URL, "renodx-dlss_SF_26.0928.0205.zip", SF_LABEL)
-        addon = extract_named(zpath, "renodx-dlss.addon64", "renodx-dlss.addon64")
+        zpath = cached_download(ADDON_URL, "renodx-dlss5_7.0.0-rc8.zip", ADDON_LABEL)
+        addon = extract_named(zpath, ADDON_NAME, ADDON_NAME)
     if os.path.isfile(local_nr):
         neural = local_nr
         log_line("Using your local nvngx_dlssnr.dll from the payload folder")
     else:
-        zpath = cached_download(NR_URL, "nvngx_dlssnr_310.8.SF-v2.zip", NR_LABEL)
+        zpath = cached_download(NR_URL, "nvngx_dlssnr_310.8.Lecram.zip", NR_LABEL)
         neural = extract_named(zpath, "nvngx_dlssnr.dll", "nvngx_dlssnr.dll")
 
     setup = cached_download(RESHAPE_URL, "ReShade_Setup_6.8.0_Addon.exe", "ReShade 6.8.0 add-on setup")
@@ -805,7 +876,7 @@ def install_game(appid: str, hook: str, overwrite: bool, api_override: str | Non
 
     placed: list[str] = []
     _place(reshade_dll, folder, f"{hook}.dll", placed)
-    _place(addon, folder, "renodx-dlss.addon64", placed)
+    _place(addon, folder, ADDON_NAME, placed)
     _place(neural, folder, "nvngx_dlssnr.dll", placed)
     if game["dlssPath"] and os.path.dirname(game["dlssPath"]) != folder:
         _place(neural, os.path.dirname(game["dlssPath"]), "nvngx_dlssnr.dll", placed)
@@ -820,7 +891,7 @@ def install_game(appid: str, hook: str, overwrite: bool, api_override: str | Non
                 continue
             _place(src, folder, name, placed)
         if game["hasDlss"] and overwrite:
-            log_line("Overwrote the game's DLSS / Streamline files. The previous copies are in .forge-dlss5-backup.")
+            log_line(f"Overwrote the game's DLSS / Streamline files. The previous copies are in {BACKUP_DIRNAME}.")
     else:
         log_line("Left the game's own DLSS / Streamline files in place. Overwrite was off.")
 
@@ -833,12 +904,12 @@ def install_game(appid: str, hook: str, overwrite: bool, api_override: str | Non
         "files": placed,
         "versions": {
             "reshade": "6.8.0-addon",
-            "shortfuse": "SF-26.0928.0205",
-            "neural": "310.8.SF-v2",
+            "addon": "renodx-dlss5-7.0.0-rc8",
+            "neural": "310.8.Lecram",
         },
         "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
-    with open(os.path.join(folder, ".forge-dlss5.json"), "w", encoding="utf-8") as handle:
+    with open(os.path.join(folder, MARKER_NAME), "w", encoding="utf-8") as handle:
         json.dump(marker, handle, indent=2)
         handle.write("\n")
     options = launch_options(hook)
@@ -859,10 +930,9 @@ def remove_game(appid: str) -> dict:
     if not game["exe"]:
         raise RuntimeError("No executable on record.")
     folder = os.path.dirname(game["exe"])
-    marker_path = os.path.join(folder, ".forge-dlss5.json")
-    if not os.path.isfile(marker_path):
-        raise RuntimeError("Forge has no install marker in that folder. Nothing was removed.")
-    marker = json.load(open(marker_path, encoding="utf-8"))
+    marker_path, marker = load_marker(folder)
+    if not marker_path or marker is None:
+        raise RuntimeError("ENHANCE has no install marker in that folder. Nothing was removed.")
     removed = []
     for filename in marker.get("files") or []:
         if filename == "ReShade.ini":
@@ -872,7 +942,7 @@ def remove_game(appid: str) -> dict:
             os.remove(path)
             removed.append(filename)
     os.remove(marker_path)
-    return {"ok": True, "removed": removed, "note": "Backups in .forge-dlss5-backup were kept. ReShade.ini was left so other presets survive."}
+    return {"ok": True, "removed": removed, "note": f"Backups in {BACKUP_DIRNAME} were kept. ReShade.ini was left so other presets survive."}
 
 
 def run_job(target, args: dict) -> None:
@@ -898,7 +968,7 @@ def run_job(target, args: dict) -> None:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "ForgeDLSS5"
+    server_version = "ENHANCE"
 
     def log_message(self, fmt: str, *args) -> None:
         return
@@ -947,7 +1017,32 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
         if path == "/api/health":
-            self._json(200, {"ok": True, "name": "forge", "version": VERSION, "port": PORT})
+            self._json(200, {"ok": True, "name": "enhance", "version": VERSION, "port": PORT})
+            return
+        if path.startswith("/cover/"):
+            appid = path[len("/cover/") :]
+            if not appid.isdigit():
+                self._json(404, {"error": "Not found"})
+                return
+            found = find_cover(appid)
+            if not found:
+                self.send_response(302)
+                self._cors()
+                self.send_header(
+                    "Location",
+                    f"https://cdn.cloudflare.steamstatic.com/steam/apps/{appid}/library_600x900.jpg",
+                )
+                self.end_headers()
+                return
+            data = open(found, "rb").read()
+            kind = "image/png" if found.lower().endswith(".png") else "image/jpeg"
+            self.send_response(200)
+            self._cors()
+            self.send_header("Content-Type", kind)
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "public, max-age=86400")
+            self.end_headers()
+            self.wfile.write(data)
             return
         if path == "/api/games":
             self._json(200, scan_games())
@@ -1002,7 +1097,7 @@ UI_HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>Forge — DLSS 5 for Proton</title>
+<title>ENHANCE — DLSS 5 for Proton</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Schibsted+Grotesk:wght@500;600&display=swap"/>
 <style>
@@ -1034,6 +1129,15 @@ UI_HTML = r"""<!DOCTYPE html>
   .pill { font-size: 12px; border: 1px solid var(--line); border-radius: 999px; padding: 2px 8px; color: var(--muted); }
   .pill.ok { color: var(--ok); } .pill.warn { color: var(--warn); } .pill.bad { color: var(--bad); }
   .list { max-height: calc(100vh - 220px); overflow:auto; }
+  .shelf { display: grid; grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: 12px; }
+  .card { position: relative; aspect-ratio: 2 / 3; overflow: hidden; border-radius: 12px; border: 1px solid var(--line); background: var(--surface2); padding: 0; text-align: left; }
+  .card img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .card .shade { position: absolute; left: 0; right: 0; bottom: 0; padding: 8px 10px; background: color-mix(in srgb, var(--bg) 90%, transparent); }
+  .card .reason { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; color: var(--warn); font-size: 12px; line-height: 1.35; margin-top: 4px; }
+  .card.dim img { opacity: 0.4; }
+  .card[aria-selected=true] { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .badge { position: absolute; top: 8px; left: 8px; background: color-mix(in srgb, var(--bg) 80%, transparent); border-radius: 999px; padding: 2px 8px; font-size: 12px; }
+  .badge.right { left: auto; right: 8px; color: var(--ok); }
   h2 { margin: 0; font-size: 28px; letter-spacing: -0.03em; font-weight: 600; }
   .mono { font-family: "IBM Plex Mono", monospace; font-size: 12px; color: var(--muted); word-break: break-all; }
   .block { margin-top: 16px; }
@@ -1051,8 +1155,8 @@ UI_HTML = r"""<!DOCTYPE html>
 <header>
   <div>
     <p class="kicker">LINUX · STEAM · PROTON</p>
-    <h1>Forge</h1>
-    <p class="sub">One click places ReShade 6.8.0 (add-on build), the ShortFuse DLSS add-on, and the NVIDIA neural runtime into a DX11 or DX12 game.</p>
+    <h1>ENHANCE</h1>
+    <p class="sub">Installed Steam games, with their covers. One click places ReShade 6.8.0, Lecram's DLSS 5 add-on, and the NVIDIA neural runtime into a DX11 or DX12 game.</p>
   </div>
   <button class="ghost" id="rescan" type="button">Rescan Steam</button>
 </header>
@@ -1062,17 +1166,17 @@ UI_HTML = r"""<!DOCTYPE html>
       <input id="q" type="search" placeholder="Filter games" aria-label="Filter games"/>
     </div>
     <div class="chips" role="toolbar">
-      <button class="chip" data-filter="ready" aria-pressed="true" type="button">Ready</button>
-      <button class="chip" data-filter="all" aria-pressed="false" type="button">All</button>
+      <button class="chip" data-filter="all" aria-pressed="true" type="button">All</button>
+      <button class="chip" data-filter="ready" aria-pressed="false" type="button">Ready</button>
       <button class="chip" data-filter="installed" aria-pressed="false" type="button">Installed</button>
       <button class="chip" data-filter="skipped" aria-pressed="false" type="button">Skipped</button>
     </div>
-    <div id="list" class="list" role="listbox" aria-label="Installed Steam games"></div>
+    <div id="list" class="shelf" role="listbox" aria-label="Installed Steam games"></div>
   </section>
   <section class="panel" id="detail"></section>
 </main>
 <script>
-const state = { games: [], filter: "ready", q: "", id: null, hook: "dxgi", overwrite: false, ack: false, log: [], busy: false };
+const state = { games: [], filter: "all", q: "", id: null, hook: "dxgi", overwrite: false, ack: false, log: [], busy: false };
 const listEl = document.getElementById("list");
 const detailEl = document.getElementById("detail");
 function ready(g) { return (g.api === "dx11" || g.api === "dx12") && g.bits !== 32 && g.exe; }
@@ -1083,7 +1187,7 @@ function pills(g) {
   const bits = g.bits ? g.bits + "-bit" : "bitness unknown";
   let html = '<span class="pill">' + api + '</span><span class="pill">' + bits + '</span>';
   if (g.hasDlss) html += '<span class="pill ok">ships DLSS</span>';
-  if (g.installedByForge) html += '<span class="pill ok">Forge installed</span>';
+  if (g.installedByForge) html += '<span class="pill ok">ENHANCE installed</span>';
   if (g.anticheat) html += '<span class="pill bad">anti-cheat</span>';
   if (g.unsupportedReason && g.api !== "dx11" && g.api !== "dx12") html += '<span class="pill warn">skipped</span>';
   return html;
@@ -1101,13 +1205,18 @@ function visible() {
 function renderList() {
   const games = visible();
   if (!state.id && games[0]) state.id = games[0].appid;
-  listEl.innerHTML = games.map(g => (
-    '<button class="game" role="option" data-id="' + g.appid + '" aria-selected="' + (g.appid === state.id) + '">' +
-    '<span class="name">' + escapeHtml(g.name) + '</span>' +
-    '<span class="pills">' + pills(g) + '</span>' +
-    '<span class="meta">' + escapeHtml(g.exeRelative || g.installDir) + '</span></button>'
-  )).join("") || '<p class="sub">No games in this filter.</p>';
-  listEl.querySelectorAll(".game").forEach(btn => btn.onclick = () => { state.id = btn.dataset.id; state.log = []; state.ack = false; render(); });
+  listEl.innerHTML = games.map(g => {
+    const why = skipped(g) ? (g.skipReason || g.unsupportedReason || "Skipped") : "";
+    const hard = why && g.api !== "unknown";
+    return '<button class="card' + (hard ? " dim" : "") + '" role="option" data-id="' + g.appid + '" aria-selected="' + (g.appid === state.id) + '">' +
+      '<img alt="" src="/cover/' + g.appid + '" onerror="this.style.display=\'none\'"/>' +
+      '<span class="badge">' + escapeHtml((g.api === "dx11" || g.api === "dx12") ? g.api.toUpperCase() : (g.api || "unknown")) + '</span>' +
+      (g.installedByForge ? '<span class="badge right">Installed</span>' : '') +
+      '<span class="shade"><span class="name">' + escapeHtml(g.name) + '</span>' +
+      (why ? '<span class="reason">' + escapeHtml(why) + '</span>' : '<span class="meta">' + (g.bits ? g.bits + "-bit" : "") + '</span>') +
+      '</span></button>';
+  }).join("") || '<p class="sub">No games in this filter.</p>';
+  listEl.querySelectorAll(".card").forEach(btn => btn.onclick = () => { state.id = btn.dataset.id; state.log = []; state.ack = false; render(); });
 }
 function selected() { return state.games.find(g => g.appid === state.id) || null; }
 function escapeHtml(s) { return String(s).replace(/[&<>"]/g, c => ({'&':'&','<':'<','>':'>','"':'"'}[c])); }
@@ -1118,7 +1227,7 @@ function notes(g) {
   return [
     "Steam → Properties → Compatibility → check “Force the use of a specific Steam Play compatibility tool”. Pick Proton Experimental, GE-Proton, or on CachyOS proton-cachyos / proton-ge-custom. Not Proton 8 or older.",
     "Paste the launch option exactly, including %command%.",
-    "NVIDIA proprietary driver and an RTX 20, 30, 40, or 50. Nouveau cannot run this. The 310.8.SF-v2 neural DLL is the patched ShortFuse model for that whole range.",
+    "NVIDIA proprietary driver. 310.8.Lecram is the RTX 50 neural DLL. On RTX 20, 30, or 40, put the matching nvngx_dlssnr.dll from the DLSS 5 Discord into ~/.local/share/enhance-dlss5/payload before installing. Nouveau cannot run this.",
     "This packs the Windows build. If the game also has a native Linux version, forcing the compatibility tool is what makes Proton start.",
     dx,
     "In game, press Home. Add-ons → enable RenoDX DLSS. If the game did not ship DLSS: Hook Method = On Present, Require DLSS = Off.",
@@ -1132,26 +1241,36 @@ function renderDetail() {
   const can = (g.api === "dx11" || g.api === "dx12" || g.api === "unknown") && g.bits !== 32 && g.exe;
   const files = [
     state.hook + ".dll — ReShade 6.8.0 add-on (ReShade64.dll renamed)",
-    "renodx-dlss.addon64 — ShortFuse DLSS add-on SF 26.0928.0205",
-    "nvngx_dlssnr.dll — NVIDIA neural runtime 310.8.SF-v2",
+    "renodx-dlss5.addon64 — Lecram DLSS 5 add-on v7.0.0-rc8",
+    "nvngx_dlssnr.dll — Lecram neural runtime 310.8.Lecram",
     "ReShade.ini — loads the add-on from DllMain"
   ];
   if (!g.hasDlss || state.overwrite) files.push("nvngx_dlss.dll, nvngx_dlssg.dll, and sl.*.dll — Streamline runtime");
   else files.push("Existing DLSS / Streamline files are left alone");
+  const why = skipped(g) ? (g.skipReason || g.unsupportedReason || "") : "";
+  const hookHelp = {
+    dxgi: "Default for both DX11 and DX12. Proton loads it when the game creates a swap chain. Start here.",
+    d3d11: "DX11 only. Use this if the game closes before the menu while dxgi.dll is the hook.",
+    d3d12: "DX12 only. Use this if the picture stays black but the ReShade overlay still opens with Home."
+  };
   detailEl.innerHTML =
-    '<h2>' + escapeHtml(g.name) + '</h2>' +
-    '<div class="pills" style="margin-top:8px">' + pills(g) + '</div>' +
+    '<div class="row" style="align-items:flex-start"><img alt="" src="/cover/' + g.appid + '" style="width:72px;aspect-ratio:2/3;object-fit:cover;border-radius:8px" onerror="this.style.display=\'none\'"/>' +
+    '<div><h2>' + escapeHtml(g.name) + '</h2>' +
+    '<div class="pills" style="margin-top:8px">' + pills(g) + '</div></div></div>' +
     '<p class="mono" style="margin-top:10px">' + escapeHtml(g.installDir) + (g.exeRelative ? "\n" + escapeHtml(g.exeRelative) : "") + '</p>' +
-    (g.unsupportedReason && g.api !== "dx11" && g.api !== "dx12" ? '<p class="sub">' + escapeHtml(g.unsupportedReason) + '</p>' : '') +
-    '<div class="block"><div class="label">Hook</div><div class="chips">' +
+    (why ? '<p class="sub" style="color:var(--warn)">' + escapeHtml(why) + '</p>' : '') +
+    '<div class="block"><div class="label">Hook</div>' +
+    '<p class="sub">The hook is the same ReShade file under a different name. That name is the Windows DLL Proton swaps in. The launch option has to use the same name.</p>' +
+    '<div class="chips">' +
       ["dxgi","d3d11","d3d12"].map(h => '<button type="button" class="hook" data-hook="' + h + '" aria-pressed="' + (state.hook===h) + '">' + h + '.dll</button>').join("") +
-    '</div></div>' +
+    '</div>' +
+    '<ul class="notes">' + ["dxgi","d3d11","d3d12"].map(h => '<li' + (state.hook===h ? ' style="color:var(--fg)"' : '') + '><strong>' + h + '.dll</strong> — ' + escapeHtml(hookHelp[h]) + '</li>').join("") + '</ul></div>' +
     '<div class="block"><div class="label">Pack</div><ul class="notes">' + files.map(f => "<li>" + escapeHtml(f) + "</li>").join("") + '</ul>' +
-    '<p class="sub">No public ShortFuse build is named v7. This installs SF 26.0928.0205 plus nvngx_dlssnr 310.8.SF-v2. Files in ~/.local/share/forge-dlss5/payload named renodx-dlss.addon64 or nvngx_dlssnr.dll are used instead of the download.</p></div>' +
+    '<p class="sub">A file named renodx-dlss5.addon64 or nvngx_dlssnr.dll in ~/.local/share/enhance-dlss5/payload is used instead of the download. 310.8.Lecram is the RTX 50 neural build.</p></div>' +
     '<div class="block check"><label><input id="overwrite" type="checkbox"' + (state.overwrite ? " checked" : "") + '/> Overwrite the game DLSS / Streamline DLLs</label></div>' +
     (g.anticheat ? '<div class="block check"><label><input id="ack" type="checkbox"' + (state.ack ? " checked" : "") + '/> I understand anti-cheat may ban or refuse to start</label></div>' : '') +
     '<div class="block row"><button class="primary" id="install" type="button"' + (can && !state.busy ? "" : " disabled") + '>' + (state.busy ? "Installing…" : (g.installedByForge ? "Reinstall" : "Install DLSS 5")) + '</button>' +
-    (g.installedByForge ? '<button class="ghost" id="remove" type="button">Remove Forge files</button>' : '') + '</div>' +
+    (g.installedByForge ? '<button class="ghost" id="remove" type="button">Remove ENHANCE files</button>' : '') + '</div>' +
     '<div class="block"><div class="label">Steam launch option</div><div class="launch"><code id="opt">' + escapeHtml(launch(state.hook)) + '</code><button class="ghost" id="copy" type="button">Copy</button></div></div>' +
     '<div class="block"><div class="label">Compatibility</div><ul class="notes">' + notes(g).map(n => "<li>" + escapeHtml(n) + "</li>").join("") + '</ul></div>' +
     (state.log.length ? '<div class="block"><div class="label">Log</div><div class="log" id="log"></div></div>' : '');
@@ -1211,7 +1330,7 @@ load();
 def serve() -> None:
     server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     url = f"http://127.0.0.1:{PORT}/"
-    print(f"Forge is running at {url}", flush=True)
+    print(f"ENHANCE is running at {url}", flush=True)
     if os.environ.get("FORGE_NO_BROWSER") != "1":
         import webbrowser
 
@@ -1296,5 +1415,5 @@ if __name__ == "__main__":
         try:
             serve()
         except OSError as exc:
-            print(f"Forge could not listen on 127.0.0.1:{PORT}: {exc}", flush=True)
+            print(f"ENHANCE could not listen on 127.0.0.1:{PORT}: {exc}", flush=True)
             raise SystemExit(1) from exc

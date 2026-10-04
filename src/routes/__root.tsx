@@ -3,14 +3,14 @@ import { AuthProvider } from "@/lib/auth/provider";
 import { PreviewHostBridge } from "@/components/preview-host-bridge";
 import appCss from "../styles.css?url";
 
-const APP_NAME = "Forge";
+const APP_NAME = "ENHANCE";
 
 export const Route = createRootRoute({
   head: () => ({
     meta: [
       { charSet: "utf-8" },
       { name: "viewport", content: "width=device-width, initial-scale=1" },
-      { title: "Forge — DLSS 5 for Proton" },
+      { title: "ENHANCE — DLSS 5 for Proton" },
       { name: "description", content: APP_NAME },
       { name: "theme-color", content: "#0c0d10" },
     ],

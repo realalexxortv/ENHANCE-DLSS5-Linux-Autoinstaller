@@ -19,12 +19,14 @@ export type Game = {
   hook: Hook | null;
   steamKind: SteamKind;
   unsupportedReason: string | null;
+  cover?: string | null;
+  skipReason?: string | null;
 };
 
 export const PACK = {
   reshade: "ReShade 6.8.0 with full add-on support",
-  shortfuse: "ShortFuse renodx-dlss.addon64 · SF 26.0928.0205",
-  neural: "NVIDIA nvngx_dlssnr.dll · 310.8.SF-v2",
+  addon: "Lecram DLSS 5 add-on renodx-dlss5.addon64 · v7.0.0-rc8",
+  neural: "Lecram nvngx_dlssnr.dll · 310.8.Lecram",
   streamline: "NVIDIA Streamline runtime (nvngx_dlss.dll, nvngx_dlssg.dll, sl.interposer.dll and the sl.*.dll set)",
 };
 
@@ -213,6 +215,61 @@ export function isSkipped(game: Game): boolean {
   return !isReady(game) || Boolean(game.anticheat);
 }
 
+function anticheatLabel(value: string): string {
+  if (value === "easyanticheat") return "Easy Anti-Cheat";
+  if (value === "battleye") return "BattlEye";
+  if (value === "vac") return "VAC";
+  return value;
+}
+
+export function skipReason(game: Game): string | null {
+  if (!isSkipped(game)) return null;
+  if (game.skipReason) return game.skipReason;
+  const parts: string[] = [];
+  if (game.bits === 32) parts.push("32-bit executable. Only 64-bit games are packed.");
+  else if (game.api === "dx9") parts.push("DirectX 9. Only DX11 and DX12 are hooked.");
+  else if (game.api === "vulkan") parts.push("Vulkan. Only DX11 and DX12 are hooked.");
+  else if (game.api === "opengl") parts.push("OpenGL. Only DX11 and DX12 are hooked.");
+  else if (!game.exe) parts.push("No Windows executable in the install folder.");
+  else if (game.api === "unknown") {
+    parts.push("The executable does not import d3d11 or d3d12. You can still force a DX11 or DX12 hook.");
+  }
+  if (game.anticheat) {
+    parts.push(
+      `${anticheatLabel(game.anticheat)} is in this folder. The hook can make the game refuse to start or ban the account.`,
+    );
+  }
+  if (parts.length === 0) return game.unsupportedReason;
+  if (game.api === "unknown" && !game.anticheat) return parts[0] ?? null;
+  return `Skipped: ${parts.join(" ")}`;
+}
+
+export function coverUrl(game: Game, live: boolean): string {
+  if (game.cover) {
+    if (live && game.cover.startsWith("/")) return `${AGENT_ORIGIN}${game.cover}`;
+    return game.cover;
+  }
+  return live ? `${AGENT_ORIGIN}/cover/${game.appid}` : `/covers/${game.appid}.jpg`;
+}
+
+export const HOOK_HELP: { hook: Hook; title: string; body: string }[] = [
+  {
+    hook: "dxgi",
+    title: "dxgi.dll",
+    body: "Default for both DX11 and DX12. Proton loads it when the game creates a swap chain. Start here.",
+  },
+  {
+    hook: "d3d11",
+    title: "d3d11.dll",
+    body: "DX11 only. Use this if the game closes before the menu while dxgi.dll is the hook.",
+  },
+  {
+    hook: "d3d12",
+    title: "d3d12.dll",
+    body: "DX12 only. Use this if the picture stays black but the ReShade overlay still opens with Home.",
+  },
+];
+
 export function launchOptions(hook: Hook): string {
   return `WINEDLLOVERRIDES="${hook}=n,b" PROTON_ENABLE_NVAPI=1 %command%`;
 }
@@ -220,9 +277,9 @@ export function launchOptions(hook: Hook): string {
 export function packLines(game: Game, hook: Hook, overwrite: boolean): string[] {
   const lines = [
     `${hook}.dll — ReShade 6.8.0 add-on build, renamed from ReShade64.dll`,
-    "renodx-dlss.addon64 — ShortFuse DLSS add-on, SF 26.0928.0205",
-    "nvngx_dlssnr.dll — NVIDIA neural runtime 310.8.SF-v2 (RTX 20 through 50)",
-    "ReShade.ini — LoadFromDllMain=renodx-dlss.addon64, Unix line endings",
+    "renodx-dlss5.addon64 — Lecram DLSS 5 add-on, v7.0.0-rc8",
+    "nvngx_dlssnr.dll — Lecram neural runtime 310.8.Lecram (RTX 50 build)",
+    "ReShade.ini — LoadFromDllMain=renodx-dlss5.addon64, Unix line endings",
   ];
   if (!game.hasDlss || overwrite) {
     lines.push(
@@ -240,24 +297,24 @@ export function packLines(game: Game, hook: Hook, overwrite: boolean): string[] 
 export function compatibilityNotes(game: Game, hook: Hook): string[] {
   const hookNote =
     game.api === "dx11" || hook === "d3d11"
-      ? "DX11: dxgi.dll is the usual Proton hook. If the game closes before the menu, switch to d3d11.dll and copy the launch option again."
-      : "DX12: dxgi.dll is the usual Proton hook. A black image with the ReShade overlay still up means switch to d3d12.dll. Use Proton Experimental, GE-Proton, or CachyOS proton-cachyos so vkd3d-proton understands the ReShade 6.8 add-on.";
+      ? "This game looks like DX11. dxgi.dll is the right first hook. d3d12.dll will not attach."
+      : "This game looks like DX12. dxgi.dll is the right first hook. d3d11.dll will not attach. Use Proton Experimental, GE-Proton, or CachyOS proton-cachyos so vkd3d-proton is new enough for ReShade 6.8.";
   const store =
     game.steamKind === "flatpak"
-      ? "This copy is the Flatpak version of Steam. Forge still writes into that library. The launch option is the same."
+      ? "This copy is the Flatpak version of Steam. ENHANCE still writes into that library. The launch option is the same."
       : game.steamKind === "snap"
-        ? "This copy is the Snap version of Steam. Forge still writes into that library. The launch option is the same."
+        ? "This copy is the Snap version of Steam. ENHANCE still writes into that library. The launch option is the same."
         : "Native, Flatpak, and Snap Steam are all scanned. The launch option does not change between them.";
   return [
     "Steam → the game → Properties → Compatibility. Check “Force the use of a specific Steam Play compatibility tool”. Choose Proton Experimental, GE-Proton, or on CachyOS proton-cachyos / proton-ge-custom. Skip Proton 8 and older.",
     "Paste the launch option into Properties → General → Launch Options, including %command%.",
-    "NVIDIA's proprietary driver and an RTX 20, 30, 40, or 50. Nouveau will not run DLSS. 310.8.SF-v2 is the patched ShortFuse neural DLL for that whole range.",
+    "NVIDIA's proprietary driver. 310.8.Lecram is the RTX 50 neural DLL. On an RTX 20, 30, or 40, put the matching nvngx_dlssnr.dll from the DLSS 5 Discord in ~/.local/share/enhance-dlss5/payload before installing. Nouveau will not run DLSS.",
     "The pack targets the Windows executable. If Steam would start a native Linux build, the compatibility checkbox is what forces Proton.",
     hookNote,
     "In the game, press Home. Open Add-ons and turn on RenoDX DLSS / Neural Rendering. Games that did not ship DLSS need Hook Method set to On Present and Require DLSS set to Off.",
-    "Single-player only. Easy Anti-Cheat, BattlEye, Vanguard, and VAC can refuse to start or ban the account. Forge will not install those quietly.",
+    "Single-player only. Easy Anti-Cheat, BattlEye, Vanguard, and VAC can refuse to start or ban the account. ENHANCE will not install those quietly.",
     store,
-    "No root. The Linux file needs python3, which Arch, CachyOS, Fedora, and Debian already have. The first install downloads ReShade, the ShortFuse add-on, and the NVIDIA files, and unpacks ReShade with 7-Zip (downloaded if it is not installed).",
+    "No root. The AppImage needs python3, which Arch, CachyOS, Fedora, and Debian already have. The first install downloads ReShade, Lecram's DLSS 5 add-on, and the NVIDIA files. If 7-Zip is not already on the system, the AppImage uses the copy bundled inside it.",
   ];
 }
 

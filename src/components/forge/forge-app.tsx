@@ -11,16 +11,19 @@ import {
 import {
   AGENT_ORIGIN,
   DEMO_GAMES,
+  HOOK_HELP,
   PACK,
   type Filter,
   type Game,
   type Hook,
   apiLabel,
   compatibilityNotes,
+  coverUrl,
   isReady,
   isSkipped,
   launchOptions,
   packLines,
+  skipReason,
 } from "@/lib/forge/model";
 
 type Mode = "demo" | "live";
@@ -40,7 +43,7 @@ export function ForgeApp() {
   const [warnings, setWarnings] = useState<string[]>([]);
   const [connectError, setConnectError] = useState<string | null>(null);
   const [connecting, setConnecting] = useState(false);
-  const [filter, setFilter] = useState<Filter>("ready");
+  const [filter, setFilter] = useState<Filter>("all");
   const [query, setQuery] = useState("");
   const [selectedId, setSelectedId] = useState(DEMO_GAMES[0]?.appid ?? "");
   const [showDetail, setShowDetail] = useState(false);
@@ -82,7 +85,7 @@ export function ForgeApp() {
     const timer = setTimeout(() => ctrl.abort(), 1200);
     try {
       const health = await fetch(`${AGENT_ORIGIN}/api/health`, { signal: ctrl.signal });
-      if (!health.ok) throw new Error("Forge did not answer.");
+      if (!health.ok) throw new Error("ENHANCE did not answer.");
       const res = await fetch(`${AGENT_ORIGIN}/api/games`, { signal: ctrl.signal });
       if (!res.ok) throw new Error("Could not read the Steam library.");
       const data = (await res.json()) as { games?: Game[]; warnings?: string[] };
@@ -95,7 +98,7 @@ export function ForgeApp() {
       if (!options?.preserveLog) setLog(null);
     } catch {
       setConnectError(
-        "No Forge app is running on this computer yet. Download it, open it, then connect again.",
+        "No ENHANCE app is running on this computer yet. Download it, open it, then connect again.",
       );
     } finally {
       clearTimeout(timer);
@@ -113,12 +116,12 @@ export function ForgeApp() {
       `${game.name} · ${apiLabel(game.api)} · 64-bit`,
       `Executable folder: ${game.exe ? game.exe.slice(0, game.exe.lastIndexOf("/")) : game.installDir}`,
       "Would download ReShade 6.8.0 add-on setup from reshade.me",
-      `Would download ${PACK.shortfuse}`,
+      `Would download ${PACK.addon}`,
       `Would download ${PACK.neural}`,
       game.hasDlss && !overwrite
         ? "Game already ships DLSS. Those DLLs would be left alone."
         : `Would download ${PACK.streamline}`,
-      "Would write ReShade.ini with LoadFromDllMain=renodx-dlss.addon64",
+      "Would write ReShade.ini with LoadFromDllMain=renodx-dlss5.addon64",
       `Steam launch option: ${launchOptions(hook)}`,
       "Sample library only — nothing was written. Open the Linux app to install into a real game folder.",
     ];
@@ -158,7 +161,7 @@ export function ForgeApp() {
       }
       await pollJob();
     } catch {
-      setLog(["Lost contact with the Forge app."]);
+      setLog(["Lost contact with the ENHANCE app."]);
       setBusy(false);
     }
   }
@@ -203,7 +206,7 @@ export function ForgeApp() {
       setLog([data.error ?? "Could not remove."]);
       return;
     }
-    setLog([`Removed ${data.removed?.join(", ") || "Forge files"}. Backups were kept.`]);
+    setLog([`Removed ${data.removed?.join(", ") || "ENHANCE files"}. Backups were kept.`]);
     await connect({ preserveLog: true });
   }
 
@@ -229,10 +232,10 @@ export function ForgeApp() {
       <header className="mx-auto flex w-full max-w-6xl flex-col gap-6 px-4 pt-8 pb-2 sm:px-6 lg:flex-row lg:items-end lg:justify-between">
         <div>
           <p className="text-xs tracking-widest text-subtle">LINUX · STEAM · PROTON</p>
-          <h1 className="mt-2 text-4xl font-semibold tracking-tight sm:text-5xl">Forge</h1>
+          <h1 className="mt-2 text-4xl font-semibold tracking-tight sm:text-5xl">ENHANCE</h1>
           <p className="mt-3 max-w-xl text-base text-muted">
-            Pick a Steam game. Forge packs ReShade 6.8.0, the ShortFuse DLSS add-on, and the
-            NVIDIA files into the Windows build so Proton can run DLSS 5.
+            Installed Steam games, with their covers. Pick a DX11 or DX12 title and ENHANCE packs
+            ReShade 6.8.0, Lecram's DLSS 5 add-on, and the NVIDIA neural runtime for Proton.
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -274,91 +277,88 @@ export function ForgeApp() {
 
         {showLauncher ? (
           <section className="mt-4 rounded-xl border border-line bg-surface p-4 sm:p-5">
-            <h2 className="text-lg font-semibold">Run Forge on Linux</h2>
+            <h2 className="text-lg font-semibold">Run ENHANCE on Linux</h2>
             <ol className="mt-3 list-decimal space-y-2 pl-5 text-sm text-muted">
-              <li>Download the single file. It is the app, not an installer that needs root.</li>
+              <li>Download the AppImage. It is the app, not an installer that needs root.</li>
               <li>
                 In the file manager, open Properties and allow executing the file, then open it.
                 A browser window lists the games Steam has installed.
               </li>
               <li>
                 Works on Arch, CachyOS, Fedora, Debian, and other glibc systems that already have
-                python3. Flatpak Steam and Snap Steam are included.
+                python3. Flatpak Steam and Snap Steam are included. If it refuses to start because
+                FUSE is missing, run it with --appimage-extract-and-run.
               </li>
             </ol>
             <a
-              href="/ForgeDLSS5.run"
-              download="ForgeDLSS5.run"
+              href="/ENHANCE-x86_64.AppImage"
+              download="ENHANCE-x86_64.AppImage"
               className="mt-4 inline-flex h-11 items-center gap-2 rounded-full bg-accent px-4 text-sm font-semibold text-accent-fg"
             >
               <Download className="size-4" aria-hidden="true" />
-              Download ForgeDLSS5.run
+              Download ENHANCE-x86_64.AppImage
             </a>
             <p className="mt-3 text-sm text-subtle">
-              The file is a real launcher, not a disk image. An AppImage would need FUSE, which
-              CachyOS and some Arch installs do not ship. This one does not.
+              Mark it executable, then open it. No root. If the desktop says FUSE is not available,
+              launch it as ./ENHANCE-x86_64.AppImage --appimage-extract-and-run.
             </p>
           </section>
         ) : null}
       </div>
 
-      <main className="mx-auto grid w-full max-w-6xl gap-4 px-4 py-4 sm:px-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.08fr)] lg:py-6">
-        <section className={`${showDetail ? "hidden lg:block" : ""} rounded-xl border border-line bg-surface p-3`}>
-          <label className="flex h-11 items-center gap-2 rounded-full border border-line bg-surface-2 px-3">
-            <Search className="size-4 text-subtle" aria-hidden="true" />
-            <input
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder="Filter games"
-              className="w-full bg-transparent text-sm outline-none placeholder:text-subtle"
-              aria-label="Filter games"
-            />
-          </label>
-          <div className="mt-3 flex flex-wrap gap-2" role="toolbar" aria-label="Library filters">
-            {FILTERS.map((item) => (
-              <button
-                key={item.id}
-                type="button"
-                aria-pressed={filter === item.id}
-                onClick={() => setFilter(item.id)}
-                className={`h-9 rounded-full px-3 text-sm ${
-                  filter === item.id ? "bg-accent text-accent-fg" : "border border-line text-muted"
-                }`}
-              >
-                {item.label}
-              </button>
-            ))}
-          </div>
-          <div className="mt-2 max-h-screen overflow-auto" role="listbox" aria-label="Games">
-            {visible.length === 0 ? (
-              <p className="px-2 py-6 text-sm text-muted">Nothing in this filter.</p>
-            ) : (
-              visible.map((game) => (
+      <main className="mx-auto grid w-full max-w-6xl gap-4 px-4 py-4 sm:px-6 lg:grid-cols-[minmax(0,1fr)_22rem] lg:items-start lg:py-6">
+        <section className={`${showDetail ? "hidden lg:block" : ""}`}>
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+            <label className="flex h-11 min-w-0 flex-1 items-center gap-2 rounded-full border border-line bg-surface px-3">
+              <Search className="size-4 text-subtle" aria-hidden="true" />
+              <input
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                placeholder="Filter games"
+                className="w-full bg-transparent text-sm outline-none placeholder:text-subtle"
+                aria-label="Filter games"
+              />
+            </label>
+            <div className="flex flex-wrap gap-2" role="toolbar" aria-label="Library filters">
+              {FILTERS.map((item) => (
                 <button
-                  key={game.appid}
+                  key={item.id}
                   type="button"
-                  role="option"
-                  aria-selected={selected?.appid === game.appid}
-                  onClick={() => selectGame(game)}
-                  className={`flex w-full flex-col gap-1 rounded-md px-3 py-3 text-left ${
-                    selected?.appid === game.appid ? "bg-surface-2" : "hover:bg-surface-2"
+                  aria-pressed={filter === item.id}
+                  onClick={() => setFilter(item.id)}
+                  className={`h-9 rounded-full px-3 text-sm ${
+                    filter === item.id ? "bg-accent text-accent-fg" : "border border-line text-muted"
                   }`}
                 >
-                  <span className="font-semibold">{game.name}</span>
-                  <Pills game={game} />
-                  <span className="truncate font-mono text-xs text-subtle">
-                    {game.exeRelative ?? game.installDir}
-                  </span>
+                  {item.label}
                 </button>
+              ))}
+            </div>
+          </div>
+          <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-4" role="listbox" aria-label="Games">
+            {visible.length === 0 ? (
+              <p className="col-span-full px-2 py-6 text-sm text-muted">Nothing in this filter.</p>
+            ) : (
+              visible.map((game) => (
+                <CoverCard
+                  key={game.appid}
+                  game={game}
+                  live={mode === "live"}
+                  selected={selected?.appid === game.appid}
+                  onSelect={() => selectGame(game)}
+                />
               ))
             )}
           </div>
         </section>
 
-        <section className={`${showDetail ? "" : "hidden lg:block"} rounded-xl border border-line bg-surface p-4 sm:p-5`}>
+        <section
+          className={`${showDetail ? "" : "hidden lg:block"} rounded-xl border border-line bg-surface p-4 sm:p-5 lg:sticky lg:top-4 lg:max-h-screen lg:overflow-auto`}
+        >
           {selected ? (
             <Detail
               game={selected}
+              live={mode === "live"}
               hook={hook}
               overwrite={overwrite}
               ack={ack}
@@ -384,6 +384,60 @@ export function ForgeApp() {
   );
 }
 
+function CoverCard({
+  game,
+  live,
+  selected,
+  onSelect,
+}: {
+  game: Game;
+  live: boolean;
+  selected: boolean;
+  onSelect: () => void;
+}) {
+  const [failed, setFailed] = useState(false);
+  const why = skipReason(game);
+  const hard = Boolean(why) && game.api !== "unknown";
+  return (
+    <button
+      type="button"
+      role="option"
+      aria-selected={selected}
+      onClick={onSelect}
+      className={`cover-frame relative overflow-hidden rounded-lg bg-surface-2 text-left ${
+        selected ? "outline-2 outline-offset-2 outline-accent" : ""
+      }`}
+    >
+      {failed ? (
+        <span className="absolute inset-0 flex items-center justify-center text-3xl font-semibold text-subtle">
+          {game.name.slice(0, 1)}
+        </span>
+      ) : (
+        <img
+          src={coverUrl(game, live)}
+          alt=""
+          className={`absolute inset-0 h-full w-full object-cover ${hard ? "opacity-40" : ""}`}
+          onError={() => setFailed(true)}
+        />
+      )}
+      <span className="absolute top-2 left-2 rounded-full bg-bg/80 px-2 py-0.5 text-xs text-fg">
+        {apiLabel(game.api)}
+      </span>
+      {game.installedByForge ? (
+        <span className="absolute top-2 right-2 rounded-full bg-bg/80 px-2 py-0.5 text-xs text-ok">Installed</span>
+      ) : null}
+      <span className="absolute inset-x-0 bottom-0 bg-bg/90 px-2.5 py-2">
+        <span className="block text-sm leading-tight font-semibold">{game.name}</span>
+        {why ? (
+          <span className="mt-1 line-clamp-4 block text-xs leading-snug text-warn">{why}</span>
+        ) : (
+          <span className="mt-1 block text-xs text-muted">{game.bits ? `${game.bits}-bit` : "64-bit"}</span>
+        )}
+      </span>
+    </button>
+  );
+}
+
 function Pills({ game }: { game: Game }) {
   return (
     <span className="flex flex-wrap gap-1.5">
@@ -395,7 +449,7 @@ function Pills({ game }: { game: Game }) {
         <span className="rounded-full border border-line px-2 py-0.5 text-xs text-ok">ships DLSS</span>
       ) : null}
       {game.installedByForge ? (
-        <span className="rounded-full border border-line px-2 py-0.5 text-xs text-ok">Forge installed</span>
+        <span className="rounded-full border border-line px-2 py-0.5 text-xs text-ok">ENHANCE installed</span>
       ) : null}
       {game.anticheat ? (
         <span className="rounded-full border border-line px-2 py-0.5 text-xs text-bad">anti-cheat</span>
@@ -409,6 +463,7 @@ function Pills({ game }: { game: Game }) {
 
 function Detail({
   game,
+  live,
   hook,
   overwrite,
   ack,
@@ -426,6 +481,7 @@ function Detail({
   onCopy,
 }: {
   game: Game;
+  live: boolean;
   hook: Hook;
   overwrite: boolean;
   ack: boolean;
@@ -444,6 +500,8 @@ function Detail({
 }) {
   const blocked = Boolean(game.anticheat) && !ack;
   const launch = launchOptions(hook);
+  const why = skipReason(game);
+  const [coverFailed, setCoverFailed] = useState(false);
   return (
     <div>
       <button
@@ -454,24 +512,31 @@ function Detail({
         <ChevronLeft className="size-4" aria-hidden="true" />
         All games
       </button>
-      <h2 className="text-2xl font-semibold tracking-tight">{game.name}</h2>
-      <div className="mt-2">
-        <Pills game={game} />
+      <div className="flex gap-3">
+        {coverFailed ? null : (
+          <img
+            src={coverUrl(game, live)}
+            alt=""
+            className="cover-frame w-16 shrink-0 rounded-md object-cover"
+            onError={() => setCoverFailed(true)}
+          />
+        )}
+        <div className="min-w-0">
+          <h2 className="text-2xl font-semibold tracking-tight">{game.name}</h2>
+          <div className="mt-2">
+            <Pills game={game} />
+          </div>
+        </div>
       </div>
-      <p className="mt-3 font-mono text-xs break-all text-muted">{game.installDir}</p>
-      {game.exeRelative ? <p className="font-mono text-xs break-all text-subtle">{game.exeRelative}</p> : null}
-      {game.unsupportedReason && game.api !== "dx11" && game.api !== "dx12" ? (
-        <p className="mt-3 text-sm text-warn">{game.unsupportedReason}</p>
-      ) : null}
-      {game.api === "unknown" ? (
-        <p className="mt-3 text-sm text-warn">
-          {game.unsupportedReason} Choosing d3d11.dll treats it as DX11. dxgi.dll or d3d12.dll treats it as DX12.
-        </p>
-      ) : null}
+      {why ? <p className="mt-3 text-sm text-warn">{why}</p> : null}
 
       <div className="mt-5">
         <p className="text-xs tracking-wider text-subtle uppercase">Hook</p>
-        <div className="mt-2 flex flex-wrap gap-2" role="radiogroup" aria-label="ReShade hook DLL">
+        <p className="mt-2 text-sm text-muted">
+          Same ReShade file, three names. The name is the Windows DLL Proton swaps in, and the launch
+          option has to match it.
+        </p>
+        <div className="mt-3 flex flex-wrap gap-2" role="radiogroup" aria-label="ReShade hook DLL">
           {HOOKS.map((item) => (
             <button
               key={item}
@@ -487,7 +552,19 @@ function Detail({
             </button>
           ))}
         </div>
+        <ul className="mt-3 space-y-2 text-sm text-muted">
+          {HOOK_HELP.map((item) => (
+            <li key={item.hook} className={hook === item.hook ? "text-fg" : ""}>
+              <span className="font-semibold">{item.title}</span>
+              {" — "}
+              {item.body}
+            </li>
+          ))}
+        </ul>
       </div>
+
+      <p className="mt-4 font-mono text-xs break-all text-muted">{game.installDir}</p>
+      {game.exeRelative ? <p className="font-mono text-xs break-all text-subtle">{game.exeRelative}</p> : null}
 
       <div className="mt-5">
         <p className="text-xs tracking-wider text-subtle uppercase">What gets packed</p>
@@ -497,9 +574,8 @@ function Detail({
           ))}
         </ul>
         <p className="mt-2 text-xs text-subtle">
-          There is no public ShortFuse build named v7. Forge uses the current add-on, SF 26.0928.0205,
-          and the patched neural DLL 310.8.SF-v2. To force a file you already have, put
-          renodx-dlss.addon64 or nvngx_dlssnr.dll in ~/.local/share/forge-dlss5/payload before installing.
+          A file named renodx-dlss5.addon64 or nvngx_dlssnr.dll in ~/.local/share/enhance-dlss5/payload
+          is used instead of the download. 310.8.Lecram is the RTX 50 neural build.
         </p>
       </div>
 
@@ -511,7 +587,7 @@ function Detail({
           onChange={(event) => onOverwrite(event.target.checked)}
         />
         Overwrite the game's DLSS and Streamline DLLs. Previous files are copied into
-        .forge-dlss5-backup first.
+        .enhance-dlss5-backup first.
       </label>
 
       {game.anticheat ? (
@@ -545,7 +621,7 @@ function Detail({
             onClick={onRemove}
             className="h-11 rounded-full border border-line px-4 text-sm"
           >
-            Remove Forge files
+            Remove ENHANCE files
           </button>
         ) : null}
       </div>
