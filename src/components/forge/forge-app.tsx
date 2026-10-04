@@ -493,6 +493,10 @@ function Detail({
   const launch = launchOptions(hook);
   const why = skipReason(game);
   const [coverFailed, setCoverFailed] = useState(false);
+  const [geek, setGeek] = useState(false);
+  const notes = compatibilityNotes(game, hook);
+  const basicNotes = notes.slice(0, 2);
+  const extraNotes = notes.slice(2);
   return (
     <div>
       <button
@@ -557,32 +561,8 @@ function Detail({
       <p className="mt-4 font-mono text-xs break-all text-muted">{game.installDir}</p>
       {game.exeRelative ? <p className="font-mono text-xs break-all text-subtle">{game.exeRelative}</p> : null}
 
-      <div className="mt-5">
-        <p className="text-xs tracking-wider text-subtle uppercase">What gets packed</p>
-        <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-muted">
-          {packLines(game, hook, overwrite).map((line) => (
-            <li key={line}>{line}</li>
-          ))}
-        </ul>
-        <p className="mt-2 text-xs text-subtle">
-          A file named renodx-dlss5.addon64 or nvngx_dlssnr.dll in ~/.local/share/enhance-dlss5/payload
-          is used instead of the download. 310.8.Lecram is the RTX 50 neural build.
-        </p>
-      </div>
-
-      <label className="mt-4 flex items-start gap-2 text-sm text-muted">
-        <input
-          type="checkbox"
-          className="mt-1 size-4"
-          checked={overwrite}
-          onChange={(event) => onOverwrite(event.target.checked)}
-        />
-        Overwrite the game's DLSS and Streamline DLLs. Previous files are copied into
-        .enhance-dlss5-backup first.
-      </label>
-
       {game.anticheat ? (
-        <label className="mt-3 flex items-start gap-2 text-sm text-bad">
+        <label className="mt-4 flex items-start gap-2 text-sm text-bad">
           <ShieldAlert className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
           <span>
             <input
@@ -641,10 +621,50 @@ function Detail({
       <div className="mt-5">
         <p className="text-xs tracking-wider text-subtle uppercase">Compatibility</p>
         <ul className="mt-2 list-disc space-y-2 pl-5 text-sm text-muted">
-          {compatibilityNotes(game, hook).map((note) => (
+          {basicNotes.map((note) => (
             <li key={note}>{note}</li>
           ))}
         </ul>
+      </div>
+
+      <div className="mt-4">
+        <button
+          type="button"
+          aria-expanded={geek}
+          onClick={() => setGeek((open) => !open)}
+          className="h-10 rounded-full border border-line px-4 text-sm text-muted"
+        >
+          Geek shit
+        </button>
+        {geek ? (
+          <div className="mt-4">
+            <p className="text-xs tracking-wider text-subtle uppercase">What gets packed</p>
+            <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-muted">
+              {packLines(game, hook, overwrite).map((line) => (
+                <li key={line}>{line}</li>
+              ))}
+            </ul>
+            <p className="mt-2 text-xs text-subtle">
+              A file named renodx-dlss5.addon64 or nvngx_dlssnr.dll in ~/.local/share/enhance-dlss5/payload
+              is used instead of the download. 310.8.Lecram is the RTX 50 neural build.
+            </p>
+            <label className="mt-4 flex items-start gap-2 text-sm text-muted">
+              <input
+                type="checkbox"
+                className="mt-1 size-4"
+                checked={overwrite}
+                onChange={(event) => onOverwrite(event.target.checked)}
+              />
+              Overwrite the game's DLSS and Streamline DLLs. Previous files are copied into
+              .enhance-dlss5-backup first.
+            </label>
+            <ul className="mt-4 list-disc space-y-2 pl-5 text-sm text-muted">
+              {extraNotes.map((note) => (
+                <li key={note}>{note}</li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
       </div>
 
       {log ? (

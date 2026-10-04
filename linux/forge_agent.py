@@ -20,7 +20,7 @@ import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 VERSION = "1.0.0"
-BUILD = "20261004.4"
+BUILD = "20261004.5"
 PORT = int(os.environ.get("ENHANCE_PORT") or os.environ.get("FORGE_PORT") or "4775")
 MARKER_NAME = ".enhance-dlss5.json"
 LEGACY_MARKER = ".forge-dlss5.json"
@@ -351,55 +351,122 @@ def steam_roots() -> list[str]:
     return found
 
 
-def paths_from_library_vdf(vdf_path: str) -> list[str]:
+def read_text(path: str) -> str | None:
     try:
-        text = open(vdf_path, encoding="utf-8", errors="replace").read()
+        data = open(path, "rb").read()
     except OSError:
-        return []
-    data = parse_vdf(text)
-    block = data.get("libraryfolders") or data.get("LibraryFolders") or {}
-    if not isinstance(block, dict):
+        return None
+    if data.startswith(b"\xff\xfe"):
+        return data.decode("utf-16-le", errors="replace")
+    if data.startswith(b"\xfe\xff"):
+        return data.decode("utf-16-be", errors="replace")
+    if data.startswith(b"\xef\xbb\xbf"):
+        data = data[3:]
+    return data.decode("utf-8", errors="replace")
+
+
+def unescape_vdf(value: str) -> str:
+    out: list[str] = []
+    i = 0
+    while i < len(value):
+        if value[i] == "\\" and i + 1 < len(value):
+            out.append(value[i + 1])
+            i += 2
+        else:
+            out.append(value[i])
+            i += 1
+    return "".join(out)
+
+
+def child_dir(parent: str | None, name: str) -> str | None:
+    if not parent or not name:
+        return None
+    direct = os.path.join(parent, name)
+    if os.path.isdir(direct):
+        return direct
+    try:
+        for entry in os.listdir(parent):
+            if entry.lower() == name.lower() and os.path.isdir(os.path.join(parent, entry)):
+                return os.path.join(parent, entry)
+    except OSError:
+        return None
+    return None
+
+
+def case_resolve(path: str) -> str | None:
+    raw = os.path.expanduser(path.strip().strip('"').rstrip("/\\"))
+    if not raw:
+        return None
+    if os.path.exists(raw):
+        try:
+            return os.path.realpath(raw)
+        except OSError:
+            return raw
+    if not raw.startswith("/"):
+        return None
+    current = "/"
+    for part in raw.split("/"):
+        if not part or part == ".":
+            continue
+        if part == "..":
+            current = os.path.dirname(current) or "/"
+            continue
+        nxt = child_dir(current, part)
+        if not nxt:
+            return None
+        current = nxt
+    try:
+        return os.path.realpath(current)
+    except OSError:
+        return current
+
+
+def paths_from_library_vdf(vdf_path: str) -> list[str]:
+    text = read_text(vdf_path)
+    if not text:
         return []
     paths: list[str] = []
-    for key, value in block.items():
-        path = None
-        if isinstance(value, dict):
-            path = value.get("path") or value.get("Path")
-        elif isinstance(value, str) and key not in {"TimeNextStatsReport", "ContentStatsID"}:
-            path = value
-        if isinstance(path, str) and path.strip():
-            paths.append(path.strip())
+    data = parse_vdf(text)
+    block = data.get("libraryfolders") or data.get("LibraryFolders") or {}
+    if isinstance(block, dict):
+        for key, value in block.items():
+            path = None
+            if isinstance(value, dict):
+                path = value.get("path") or value.get("Path")
+            elif isinstance(value, str) and key not in {"TimeNextStatsReport", "ContentStatsID"}:
+                path = value
+            if isinstance(path, str) and path.strip():
+                paths.append(unescape_vdf(path.strip()))
+    for found in re.findall(r'"path"\s+"([^"]*)"', text, flags=re.IGNORECASE):
+        found = unescape_vdf(found.strip())
+        if found and found not in paths:
+            paths.append(found)
     return paths
 
 
 def base_install_folders(root: str) -> list[str]:
-    cfg = os.path.join(root, "config", "config.vdf")
-    try:
-        text = open(cfg, encoding="utf-8", errors="replace").read()
-    except OSError:
+    text = read_text(os.path.join(root, "config", "config.vdf"))
+    if not text:
         return []
-    return re.findall(r'"BaseInstallFolder_\d+"\s+"([^"]+)"', text)
+    return [unescape_vdf(path) for path in re.findall(r'"BaseInstallFolder_\d+"\s+"([^"]+)"', text)]
 
 
 def library_root_from(path: str, require_games: bool = False) -> str | None:
     if not path:
         return None
-    raw = os.path.expanduser(path.strip().strip('"').rstrip("/\\"))
+    raw = case_resolve(path)
     if not raw:
         return None
-    try:
-        raw = os.path.realpath(raw)
-    except OSError:
-        return None
     if os.path.basename(raw).lower() == "steamapps":
-        steamapps = raw
+        steamapps = raw if os.path.isdir(raw) else None
         root = os.path.dirname(raw)
     else:
         root = raw
-        steamapps = os.path.join(raw, "steamapps")
-    if not os.path.isdir(steamapps) or not os.path.isdir(root):
+        steamapps = child_dir(raw, "steamapps")
+    if not steamapps or not os.path.isdir(root):
         return None
-    if require_games and not has_manifests(steamapps) and not os.path.isfile(os.path.join(steamapps, "libraryfolder.vdf")):
+    marker = os.path.isfile(os.path.join(steamapps, "libraryfolder.vdf"))
+    if require_games and not has_manifests(steamapps) and not marker:
         return None
     return root
 
@@ -428,8 +495,15 @@ def decode_mount_path(raw: str) -> str:
 _SKIP_FS = {
     "proc", "sysfs", "devtmpfs", "devpts", "tmpfs", "cgroup", "cgroup2",
     "overlay", "squashfs", "ramfs", "securityfs", "pstore", "bpf", "tracefs",
-    "debugfs", "configfs", "fusectl", "mqueue", "hugetlbfs", "autofs",
+    "debugfs", "configfs", "fusectl", "mqueue", "hugetlbfs",
     "binfmt_misc", "rpc_pipefs", "nsfs", "efivarfs",
+}
+
+_SKIP_WALK = {
+    "lost+found", "node_modules", ".git", "proc", "sys", "dev",
+    "compatdata", "shadercache", "downloading", "temp", "depotcache",
+    "$recycle.bin", "system volume information", "windows",
+    "program files", "program files (x86)", "timeshift", "snapshots",
 }
 
 
@@ -452,7 +526,7 @@ def mounted_partitions() -> list[str]:
             continue
         if mount in {"/", "/boot", "/boot/efi", "/efi"}:
             continue
-        if mount.startswith(("/proc", "/sys", "/dev", "/snap", "/run/snapd", "/var/lib/docker", "/var/lib/flatpak", "/run/user")):
+        if mount.startswith(("/proc", "/sys", "/dev", "/snap", "/run/snapd", "/var/lib/docker", "/var/lib/flatpak")):
             continue
         if mount in seen or not os.path.isdir(mount):
             continue
@@ -461,77 +535,99 @@ def mounted_partitions() -> list[str]:
     return points
 
 
+def search_starts() -> list[str]:
+    home = os.path.expanduser("~")
+    starts = [
+        home,
+        "/mnt",
+        "/media",
+        "/run/media",
+        "/opt",
+        os.path.join(home, "mnt"),
+        os.path.join(home, "media"),
+        os.path.join(home, "Games"),
+        os.path.join(home, "games"),
+    ]
+    starts.extend(mounted_partitions())
+    run_user = "/run/user"
+    if os.path.isdir(run_user):
+        try:
+            for uid in os.listdir(run_user):
+                doc = os.path.join(run_user, uid, "doc")
+                if os.path.isdir(doc):
+                    starts.append(doc)
+        except OSError:
+            pass
+    return starts
+
+
 def resolve_recorded_library(raw: str) -> str | None:
     direct = library_root_from(raw, require_games=False)
     if direct:
         return direct
-    expanded = os.path.expanduser(raw.strip().strip('"').rstrip("/\\"))
+    expanded = unescape_vdf(os.path.expanduser(raw.strip().strip('"').rstrip("/\\")))
     parts = [part for part in re.split(r"[\\/]", expanded) if part not in {"", ".", ".."}]
     if parts and len(parts[0]) == 2 and parts[0][1] == ":":
         parts = parts[1:]
-    tail = parts[-2:] if len(parts) >= 2 else parts[-1:]
+    tail = parts[-3:] if len(parts) >= 3 else parts
     if not tail:
         return None
-    for mount in mounted_partitions():
+    for start in search_starts():
         for size in range(len(tail), 0, -1):
-            guess = os.path.join(mount, *tail[-size:])
+            guess = os.path.join(start, *tail[-size:])
             found = library_root_from(guess, require_games=False)
             if found:
                 return found
     return None
 
 
-def home_library_hints() -> list[str]:
-    home = os.path.expanduser("~")
-    names = (
-        "SteamLibrary",
-        "Steam",
-        "steamapps",
-        "Games",
-        "games",
-        os.path.join("Games", "SteamLibrary"),
-        os.path.join("games", "SteamLibrary"),
-        os.path.join("Games", "Steam"),
-        os.path.join("games", "Steam"),
-    )
-    return [os.path.join(home, name) for name in names]
-
-
-def probe_mount(mount: str) -> list[str]:
+def find_libraries_under(start: str, max_depth: int = 5, budget: list[int] | None = None) -> list[str]:
+    if budget is None:
+        budget = [6000]
     found: list[str] = []
-    seen: set[str] = set()
-
-    def consider(path: str) -> None:
-        root = library_root_from(path, require_games=True)
-        if root and root not in seen:
-            seen.add(root)
-            found.append(root)
-
-    consider(mount)
-    try:
-        names = os.listdir(mount)
-    except OSError:
+    if not os.path.isdir(start):
         return found
-    for name in names:
-        if name.startswith(".") or name == "lost+found":
-            continue
-        child = os.path.join(mount, name)
-        if not os.path.isdir(child):
-            continue
-        consider(child)
-        low = name.lower()
-        if "steam" not in low and "game" not in low:
-            continue
+    stack: list[tuple[str, int]] = [(start, 0)]
+    seen: set[str] = set()
+    hints = ("steam", "game", "library", "nvme", "ssd", "disk", "media")
+    while stack and budget[0] > 0:
+        path, depth = stack.pop()
         try:
-            inner = os.listdir(child)
+            real = os.path.realpath(path)
+        except OSError:
+            real = path
+        if real in seen:
+            continue
+        seen.add(real)
+        budget[0] -= 1
+        try:
+            entries = list(os.scandir(path))
         except OSError:
             continue
-        for sub in inner:
-            if sub.startswith("."):
+        dirs = []
+        for entry in entries:
+            try:
+                is_dir = entry.is_dir(follow_symlinks=True)
+            except OSError:
                 continue
-            nested = os.path.join(child, sub)
-            if os.path.isdir(nested):
-                consider(nested)
+            if not is_dir:
+                continue
+            low = entry.name.lower()
+            if low == "steamapps":
+                marker = os.path.isfile(os.path.join(entry.path, "libraryfolder.vdf"))
+                if has_manifests(entry.path) or marker:
+                    parent = os.path.dirname(entry.path)
+                    if parent not in found:
+                        found.append(parent)
+                continue
+            if entry.name.startswith(".") or low in _SKIP_WALK:
+                continue
+            dirs.append(entry)
+        if depth >= max_depth:
+            continue
+        dirs.sort(key=lambda entry: (0 if any(h in entry.name.lower() for h in hints) else 1, entry.name.lower()))
+        for entry in reversed(dirs):
+            stack.append((entry.path, depth + 1))
     return found
 
 
@@ -540,35 +636,50 @@ def discover_libraries(roots: list[str]) -> tuple[list[str], list[str]]:
     seen: set[str] = set()
     unresolved: list[str] = []
 
-    def add(path: str | None) -> None:
-        if not path:
+    def add(path: str | None, require_games: bool = False) -> None:
+        root = library_root_from(path or "", require_games=require_games) if path else None
+        if not root:
             return
         try:
-            real = os.path.realpath(path)
+            real = os.path.realpath(root)
         except OSError:
-            return
-        if real in seen or not os.path.isdir(os.path.join(real, "steamapps")):
+            real = root
+        if real in seen:
             return
         seen.add(real)
         ordered.append(real)
 
     recorded: list[str] = []
     for root in roots:
-        add(library_root_from(root, require_games=False) or root)
-        recorded.extend(paths_from_library_vdf(os.path.join(root, "steamapps", "libraryfolders.vdf")))
+        add(root, require_games=False)
+        steamapps = child_dir(root, "steamapps")
+        if steamapps:
+            recorded.extend(paths_from_library_vdf(os.path.join(steamapps, "libraryfolders.vdf")))
         recorded.extend(paths_from_library_vdf(os.path.join(root, "config", "libraryfolders.vdf")))
         recorded.extend(base_install_folders(root))
     for raw in recorded:
         resolved = resolve_recorded_library(raw)
         if resolved:
-            add(resolved)
+            add(resolved, require_games=False)
         else:
             unresolved.append(raw)
-    for hint in home_library_hints():
-        add(library_root_from(hint, require_games=True))
-    for mount in mounted_partitions():
-        for found in probe_mount(mount):
-            add(found)
+    mounts = mounted_partitions()
+    home = os.path.expanduser("~")
+    ordered_starts = mounts + [
+        start for start in search_starts() if start not in mounts and home not in start
+    ]
+    ordered_starts.append(home)
+    seen_starts: set[str] = set()
+    for start in ordered_starts:
+        try:
+            real = os.path.realpath(start)
+        except OSError:
+            real = start
+        if real in seen_starts or not os.path.isdir(start):
+            continue
+        seen_starts.add(real)
+        for found in find_libraries_under(start, budget=[2500]):
+            add(found, require_games=True)
     found_names = {os.path.basename(path).lower() for path in ordered}
     warnings: list[str] = []
     warned: set[str] = set()
@@ -579,7 +690,9 @@ def discover_libraries(roots: list[str]) -> tuple[list[str], list[str]]:
         if raw in warned:
             continue
         warned.add(raw)
-        warnings.append(f"Steam lists a library at {raw}, but that folder is not available.")
+        warnings.append(
+            f"Steam lists a library at {raw}, but that disk is not mounted or the folder was renamed."
+        )
     return ordered, warnings
 
 
@@ -723,8 +836,10 @@ def skip_reason(api: str, bits: int | None, exe: str | None, anticheat: str | No
 
 
 def game_record(appid: str, name: str, library: str, installdir: str, kind: str) -> dict | None:
-    root = os.path.join(library, "steamapps", "common", installdir)
-    if not os.path.isdir(root):
+    steamapps = child_dir(library, "steamapps")
+    common = child_dir(steamapps, "common") if steamapps else None
+    root = child_dir(common, installdir) if common else None
+    if not root:
         return None
     exe, info = choose_exe(root, installdir)
     api = "unknown"
@@ -797,13 +912,6 @@ def scan_games() -> dict:
                 continue
             low = name.lower()
             if low.startswith("proton ") or "steam linux runtime" in low or "steamworks common" in low:
-                continue
-            flags = 0
-            try:
-                flags = int(state.get("StateFlags") or state.get("stateflags") or "0")
-            except ValueError:
-                flags = 0
-            if flags and (flags & 4) == 0:
                 continue
             installdir = state.get("installdir") or state.get("InstallDir")
             if not isinstance(installdir, str) or not installdir:
@@ -1325,7 +1433,7 @@ UI_HTML = r"""<!DOCTYPE html>
   <section class="panel" id="detail"></section>
 </main>
 <script>
-const state = { games: [], filter: "all", q: "", id: null, hook: "dxgi", overwrite: false, ack: false, log: [], busy: false };
+const state = { games: [], filter: "all", q: "", id: null, hook: "dxgi", overwrite: false, ack: false, log: [], busy: false, geek: false };
 const listEl = document.getElementById("list");
 const detailEl = document.getElementById("detail");
 function ready(g) { return (g.api === "dx11" || g.api === "dx12") && g.bits !== 32 && g.exe; }
@@ -1403,6 +1511,8 @@ function renderDetail() {
     d3d11: "DX11 only. Use this if the game closes before the menu while dxgi.dll is the hook.",
     d3d12: "DX12 only. Use this if the picture stays black but the ReShade overlay still opens with Home."
   };
+  const basic = notes(g).slice(0, 2);
+  const extra = notes(g).slice(2);
   detailEl.innerHTML =
     '<div class="row" style="align-items:flex-start"><img alt="" src="' + coverSrc(g.appid) + '" style="width:72px;aspect-ratio:2/3;object-fit:cover;border-radius:8px" onerror="this.style.display=\'none\'"/>' +
     '<div><h2>' + escapeHtml(g.name) + '</h2>' +
@@ -1415,15 +1525,20 @@ function renderDetail() {
       ["dxgi","d3d11","d3d12"].map(h => '<button type="button" class="hook" data-hook="' + h + '" aria-pressed="' + (state.hook===h) + '">' + h + '.dll</button>').join("") +
     '</div>' +
     '<ul class="notes">' + ["dxgi","d3d11","d3d12"].map(h => '<li' + (state.hook===h ? ' style="color:var(--fg)"' : '') + '><strong>' + h + '.dll</strong> — ' + escapeHtml(hookHelp[h]) + '</li>').join("") + '</ul></div>' +
-    '<div class="block"><div class="label">Pack</div><ul class="notes">' + files.map(f => "<li>" + escapeHtml(f) + "</li>").join("") + '</ul>' +
-    '<p class="sub">A file named renodx-dlss5.addon64 or nvngx_dlssnr.dll in ~/.local/share/enhance-dlss5/payload is used instead of the download. 310.8.Lecram is the RTX 50 neural build.</p></div>' +
-    '<div class="block check"><label><input id="overwrite" type="checkbox"' + (state.overwrite ? " checked" : "") + '/> Overwrite the game DLSS / Streamline DLLs</label></div>' +
     (g.anticheat ? '<div class="block check"><label><input id="ack" type="checkbox"' + (state.ack ? " checked" : "") + '/> I understand anti-cheat may ban or refuse to start</label></div>' : '') +
     '<div class="block row"><button class="primary" id="install" type="button"' + (can && !state.busy ? "" : " disabled") + '>' + (state.busy ? "Installing…" : (g.installedByForge ? "Reinstall" : "Install DLSS 5")) + '</button>' +
     (g.installedByForge ? '<button class="ghost" id="remove" type="button">Remove ENHANCE files</button>' : '') + '</div>' +
     '<div class="block"><div class="label">Steam launch option</div><div class="launch"><code id="opt">' + escapeHtml(launch(state.hook)) + '</code><button class="ghost" id="copy" type="button">Copy</button></div></div>' +
-    '<div class="block"><div class="label">Compatibility</div><ul class="notes">' + notes(g).map(n => "<li>" + escapeHtml(n) + "</li>").join("") + '</ul></div>' +
+    '<div class="block"><div class="label">Compatibility</div><ul class="notes">' + basic.map(n => "<li>" + escapeHtml(n) + "</li>").join("") + '</ul></div>' +
+    '<div class="block"><button class="ghost" id="geek" type="button" aria-expanded="' + (state.geek ? "true" : "false") + '">Geek shit</button></div>' +
+    (state.geek ?
+      '<div class="block"><div class="label">Pack</div><ul class="notes">' + files.map(f => "<li>" + escapeHtml(f) + "</li>").join("") + '</ul>' +
+      '<p class="sub">A file named renodx-dlss5.addon64 or nvngx_dlssnr.dll in ~/.local/share/enhance-dlss5/payload is used instead of the download. 310.8.Lecram is the RTX 50 neural build.</p>' +
+      '<div class="block check"><label><input id="overwrite" type="checkbox"' + (state.overwrite ? " checked" : "") + '/> Overwrite the game DLSS / Streamline DLLs</label></div>' +
+      '<ul class="notes">' + extra.map(n => "<li>" + escapeHtml(n) + "</li>").join("") + '</ul></div>'
+      : '') +
     (state.log.length ? '<div class="block"><div class="label">Log</div><div class="log" id="log"></div></div>' : '');
+  const geek = document.getElementById("geek"); if (geek) geek.onclick = () => { state.geek = !state.geek; renderDetail(); };
   detailEl.querySelectorAll(".hook").forEach(btn => btn.onclick = () => { state.hook = btn.dataset.hook; renderDetail(); });
   const ov = document.getElementById("overwrite"); if (ov) ov.onchange = () => { state.overwrite = ov.checked; renderDetail(); };
   const ack = document.getElementById("ack"); if (ack) ack.onchange = () => { state.ack = ack.checked; };
@@ -1702,8 +1817,21 @@ def selftest() -> None:
         '"InstallConfigStore" { "Software" { "Valve" { "Steam" { "BaseInstallFolder_1" "%s" } } } }\n' % other
     )
     found, warns = discover_libraries([root])
-    assert other in found, (found, warns)
-    assert root in found, found
+    assert os.path.realpath(other) in found, (found, warns)
+    assert os.path.realpath(root) in found, found
+    deep = os.path.join(base, "disk", "Data", "Library")
+    os.makedirs(os.path.join(deep, "SteamApps", "common", "Other"))
+    open(os.path.join(deep, "SteamApps", "appmanifest_11.acf"), "w", encoding="utf-8").write(
+        '"AppState" { "appid" "11" "name" "Other" "StateFlags" "4" "installdir" "Other" }\n'
+    )
+    walked = find_libraries_under(os.path.join(base, "disk"))
+    assert os.path.realpath(deep) in [os.path.realpath(p) for p in walked], walked
+    mismatched = os.path.join(base, "CaseDisk", "SteamLibrary")
+    os.makedirs(os.path.join(mismatched, "steamapps"))
+    open(os.path.join(mismatched, "steamapps", "libraryfolder.vdf"), "w", encoding="utf-8").write("{}\n")
+    wrong = mismatched.replace("CaseDisk", "casedisk").replace("SteamLibrary", "steamlibrary")
+    resolved = library_root_from(wrong)
+    assert resolved and os.path.realpath(resolved) == os.path.realpath(mismatched), (wrong, resolved)
     print("selftest ok")
 
 
