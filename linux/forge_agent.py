@@ -11,6 +11,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import tarfile
 import tempfile
 import threading
@@ -20,7 +21,7 @@ import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 VERSION = "1.0.0"
-BUILD = "20261007.1"
+BUILD = "20261007.2"
 PORT = int(os.environ.get("ENHANCE_PORT") or os.environ.get("FORGE_PORT") or "4775")
 MARKER_NAME = ".enhance-dlss5.json"
 LEGACY_MARKER = ".forge-dlss5.json"
@@ -106,6 +107,78 @@ def cache_dir() -> str:
 
 def payload_dir() -> str:
     return os.path.join(home_dir(), "payload")
+
+
+def extra_libraries_path() -> str:
+    return os.path.join(home_dir(), "extra-libraries.json")
+
+
+def load_extra_libraries() -> list[str]:
+    try:
+        data = json.load(open(extra_libraries_path(), encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(data, list):
+        return []
+    return [item for item in data if isinstance(item, str) and item.startswith("/")]
+
+
+def save_extra_libraries(paths: list[str]) -> None:
+    os.makedirs(home_dir(), exist_ok=True)
+    with open(extra_libraries_path(), "w", encoding="utf-8") as handle:
+        json.dump(paths, handle, indent=2)
+        handle.write("\n")
+
+
+def add_extra_library(raw: str) -> str:
+    root = library_root_from(raw, require_games=False)
+    if not root:
+        raise RuntimeError(
+            "That folder is not a Steam library. Choose the folder that contains steamapps."
+        )
+    try:
+        root = os.path.realpath(root)
+    except OSError:
+        pass
+    paths = load_extra_libraries()
+    if root not in paths:
+        paths.append(root)
+        save_extra_libraries(paths)
+    return root
+
+
+def remove_extra_library(raw: str) -> None:
+    try:
+        target = os.path.realpath(raw)
+    except OSError:
+        target = raw
+    save_extra_libraries([path for path in load_extra_libraries() if path not in {target, raw}])
+
+
+def pick_directory() -> str:
+    desktop = (os.environ.get("XDG_CURRENT_DESKTOP") or "") + (os.environ.get("DESKTOP_SESSION") or "")
+    kde = "kde" in desktop.lower()
+    home = os.path.expanduser("~")
+    kdialog = ["kdialog", "--getexistingdirectory", home, "--title", "Choose the Steam library folder"]
+    zenity = ["zenity", "--file-selection", "--directory", "--title=Choose the Steam library folder"]
+    commands = [kdialog, zenity] if kde else [zenity, kdialog]
+    found = False
+    for cmd in commands:
+        if shutil.which(cmd[0]) is None:
+            continue
+        found = True
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        if proc.returncode != 0:
+            raise RuntimeError("No folder was chosen.")
+        path = (proc.stdout or "").strip()
+        if path:
+            return path
+        raise RuntimeError("No folder was chosen.")
+    if not found:
+        raise RuntimeError(
+            "No folder picker is installed. Type the path of the folder that contains steamapps."
+        )
+    raise RuntimeError("No folder was chosen.")
 
 
 def log_line(text: str) -> None:
@@ -665,6 +738,11 @@ def discover_libraries(roots: list[str]) -> tuple[list[str], list[str]]:
             add(resolved, require_games=False)
         else:
             unresolved.append(raw)
+    for extra in load_extra_libraries():
+        if os.path.isdir(extra):
+            add(extra, require_games=False)
+        else:
+            unresolved.append(extra)
     mounts = mounted_partitions()
     home = os.path.expanduser("~")
     ordered_starts = mounts + [
@@ -683,9 +761,13 @@ def discover_libraries(roots: list[str]) -> tuple[list[str], list[str]]:
         for found in find_libraries_under(start, budget=[2500]):
             add(found, require_games=True)
     found_names = {os.path.basename(path).lower() for path in ordered}
+    saved = set(load_extra_libraries())
     warnings: list[str] = []
     warned: set[str] = set()
     for raw in unresolved:
+        if raw in saved:
+            warnings.append(f"The library you added is not there anymore: {raw}")
+            continue
         tail = os.path.basename(raw.rstrip("/\\")).lower()
         if tail and tail in found_names:
             continue
@@ -952,7 +1034,7 @@ def scan_games() -> dict:
         warnings.append(
             "No Steam library found. Checked the native, Flatpak, and Snap locations, and other mounted partitions."
         )
-        return {"games": [], "roots": [], "warnings": warnings}
+        return {"games": [], "roots": [], "warnings": warnings, "extraLibraries": load_extra_libraries()}
     for library in libraries:
         kind = steam_kind(library)
         steamapps = os.path.join(library, "steamapps")
@@ -991,7 +1073,7 @@ def scan_games() -> dict:
             if record:
                 games.append(record)
     games.sort(key=lambda g: g["name"].lower())
-    return {"games": games, "roots": roots, "warnings": warnings}
+    return {"games": games, "roots": roots, "warnings": warnings, "extraLibraries": load_extra_libraries()}
 
 
 def _urlretrieve(url: str, dest: str) -> None:
@@ -1408,6 +1490,19 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         path = self.path.split("?", 1)[0]
         data = self._read_json()
+        if path == "/api/library":
+            try:
+                action = str(data.get("action") or "add")
+                if action == "remove":
+                    remove_extra_library(str(data.get("path") or ""))
+                elif action == "pick":
+                    add_extra_library(pick_directory())
+                else:
+                    add_extra_library(str(data.get("path") or ""))
+                self._json(200, scan_games())
+            except Exception as exc:  # noqa: BLE001
+                self._json(400, {"error": str(exc)})
+            return
         if path == "/api/install":
             with JOB_LOCK:
                 busy = JOB["running"]
@@ -1467,7 +1562,7 @@ UI_HTML = r"""<!DOCTYPE html>
   @media (max-width: 900px) { main { grid-template-columns: 1fr; padding: 12px; } header { padding: 20px 12px 4px; flex-direction: column; align-items: flex-start; } }
   .panel { background: var(--surface); border: 1px solid var(--line); border-radius: 20px; padding: 12px; min-width: 0; }
   .row { display:flex; gap:8px; align-items:center; }
-  input[type=search] { flex:1; background: var(--surface2); border: 1px solid var(--line); border-radius: 999px; padding: 10px 14px; }
+  input[type=search], input[type=text] { flex:1; min-width: 0; background: var(--surface2); border: 1px solid var(--line); border-radius: 999px; padding: 10px 14px; }
   .chips { display:flex; gap:6px; flex-wrap:wrap; margin: 10px 0; }
   .chip, .hook { background: transparent; border: 1px solid var(--line); border-radius: 999px; padding: 8px 12px; color: var(--muted); }
   .chip[aria-pressed=true], .hook[aria-pressed=true] { background: var(--accent); color: var(--accent-fg); border-color: transparent; }
@@ -1522,12 +1617,24 @@ UI_HTML = r"""<!DOCTYPE html>
       <button class="chip" data-filter="installed" aria-pressed="false" type="button">Installed</button>
       <button class="chip" data-filter="skipped" aria-pressed="false" type="button">Skipped</button>
     </div>
+    <div class="block">
+      <div class="label">Add a library</div>
+      <p class="sub" style="margin-top:0">If a disk is missing, choose the folder that contains steamapps.</p>
+      <div class="row">
+        <input id="libpath" type="text" placeholder="/mnt/games/SteamLibrary" aria-label="Steam library folder"/>
+        <button class="ghost" id="picklib" type="button">Choose folder</button>
+        <button class="primary" id="addlib" type="button">Add</button>
+      </div>
+      <p id="liberr" class="sub" style="color:var(--warn)"></p>
+      <div id="liblist"></div>
+    </div>
+    <div id="warns"></div>
     <div id="list" class="shelf" role="listbox" aria-label="Installed Steam games"></div>
   </section>
   <section class="panel" id="detail"></section>
 </main>
 <script>
-const state = { games: [], filter: "all", q: "", id: null, hook: "dxgi", overwrite: false, ack: false, log: [], busy: false, geek: false };
+const state = { games: [], libraries: [], warnings: [], filter: "all", q: "", id: null, hook: "dxgi", overwrite: false, ack: false, log: [], busy: false, geek: false, libError: "" };
 const listEl = document.getElementById("list");
 const detailEl = document.getElementById("detail");
 function ready(g) { return (g.api === "dx9" || g.api === "dx10" || g.api === "dx11" || g.api === "dx12") && g.bits !== 32 && g.exe; }
@@ -1693,13 +1800,50 @@ function renderDetail() {
   const copy = document.getElementById("copy"); if (copy) copy.onclick = async () => { await navigator.clipboard.writeText(launch(state.hook)); copy.textContent = "Copied"; };
   const log = document.getElementById("log"); if (log) log.textContent = state.log.join("\n");
 }
-function render() { renderList(); renderDetail(); }
-async function load() {
-  const res = await fetch("/api/games");
-  const data = await res.json();
+function render() { renderList(); renderDetail(); renderLibraries(); }
+function applyScan(data) {
   state.games = data.games || [];
+  state.libraries = data.extraLibraries || [];
+  state.warnings = data.warnings || [];
   if (!state.games.some(g => g.appid === state.id)) state.id = (visible()[0] || state.games[0] || {}).appid || null;
   render();
+}
+function renderLibraries() {
+  const err = document.getElementById("liberr");
+  const box = document.getElementById("liblist");
+  const warns = document.getElementById("warns");
+  if (err) err.textContent = state.libError || "";
+  if (warns) warns.innerHTML = (state.warnings || []).map(w => '<p class="sub" style="color:var(--warn)">' + escapeHtml(w) + '</p>').join("");
+  if (!box) return;
+  box.innerHTML = (state.libraries || []).map(p =>
+    '<div class="row" style="margin-top:8px"><span class="mono" style="flex:1">' + escapeHtml(p) + '</span><button class="ghost" type="button" data-drop="' + escapeHtml(p) + '">Remove</button></div>'
+  ).join("");
+  box.querySelectorAll("[data-drop]").forEach(btn => btn.onclick = () => dropLibrary(btn.getAttribute("data-drop")));
+}
+async function libraryRequest(body) {
+  const res = await fetch("/api/library", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify(body) });
+  const data = await res.json();
+  if (!res.ok) { state.libError = data.error || "Could not add that folder."; renderLibraries(); return; }
+  state.libError = "";
+  applyScan(data);
+}
+async function addLibrary() {
+  const input = document.getElementById("libpath");
+  await libraryRequest({ path: input.value });
+  if (!state.libError) input.value = "";
+}
+async function pickLibrary() {
+  state.libError = "Opening a folder picker…";
+  renderLibraries();
+  await libraryRequest({ action: "pick" });
+}
+async function dropLibrary(path) {
+  state.libError = "";
+  await libraryRequest({ action: "remove", path: path });
+}
+async function load() {
+  const res = await fetch("/api/games");
+  applyScan(await res.json());
 }
 async function poll() {
   const res = await fetch("/api/job");
@@ -1727,6 +1871,9 @@ async function doRemove() {
   load();
 }
 document.getElementById("rescan").onclick = load;
+document.getElementById("addlib").onclick = addLibrary;
+document.getElementById("picklib").onclick = pickLibrary;
+document.getElementById("libpath").onkeydown = (e) => { if (e.key === "Enter") addLibrary(); };
 document.getElementById("q").oninput = (e) => { state.q = e.target.value; render(); };
 document.querySelectorAll(".chip").forEach(btn => btn.onclick = () => {
   state.filter = btn.dataset.filter;
@@ -1984,6 +2131,25 @@ def selftest() -> None:
     wrong = mismatched.replace("CaseDisk", "casedisk").replace("SteamLibrary", "steamlibrary")
     resolved = library_root_from(wrong)
     assert resolved and os.path.realpath(resolved) == os.path.realpath(mismatched), (wrong, resolved)
+    old_home = os.environ.get("ENHANCE_HOME")
+    home = tempfile.mkdtemp()
+    os.environ["ENHANCE_HOME"] = home
+    lib = tempfile.mkdtemp()
+    os.makedirs(os.path.join(lib, "steamapps"))
+    added = add_extra_library(os.path.join(lib, "steamapps"))
+    assert os.path.realpath(added) == os.path.realpath(lib)
+    assert load_extra_libraries() == [os.path.realpath(lib)]
+    try:
+        add_extra_library(home)
+        raise AssertionError("a normal folder was accepted")
+    except RuntimeError:
+        pass
+    remove_extra_library(lib)
+    assert load_extra_libraries() == []
+    if old_home is None:
+        os.environ.pop("ENHANCE_HOME", None)
+    else:
+        os.environ["ENHANCE_HOME"] = old_home
     print("selftest ok")
 
 

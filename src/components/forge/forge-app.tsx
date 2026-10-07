@@ -42,6 +42,10 @@ export function ForgeApp() {
   const [mode, setMode] = useState<Mode>("demo");
   const [games, setGames] = useState<Game[]>(DEMO_GAMES);
   const [warnings, setWarnings] = useState<string[]>([]);
+  const [extraLibraries, setExtraLibraries] = useState<string[]>([]);
+  const [libraryPath, setLibraryPath] = useState("");
+  const [libraryError, setLibraryError] = useState<string | null>(null);
+  const [libraryBusy, setLibraryBusy] = useState(false);
   const [connectError, setConnectError] = useState<string | null>(null);
   const [connecting, setConnecting] = useState(false);
   const [filter, setFilter] = useState<Filter>("all");
@@ -89,10 +93,11 @@ export function ForgeApp() {
       if (!health.ok) throw new Error("ENHANCE did not answer.");
       const res = await fetch(`${AGENT_ORIGIN}/api/games`, { signal: ctrl.signal });
       if (!res.ok) throw new Error("Could not read the Steam library.");
-      const data = (await res.json()) as { games?: Game[]; warnings?: string[] };
+      const data = (await res.json()) as { games?: Game[]; warnings?: string[]; extraLibraries?: string[] };
       const next = data.games ?? [];
       setGames(next);
       setWarnings(data.warnings ?? []);
+      setExtraLibraries(data.extraLibraries ?? []);
       setMode("live");
       setSelectedId((current) => (next.some((game) => game.appid === current) ? current : (next[0]?.appid ?? "")));
       setShowDetail(true);
@@ -104,6 +109,40 @@ export function ForgeApp() {
     } finally {
       clearTimeout(timer);
       setConnecting(false);
+    }
+  }
+
+  async function sendLibrary(body: Record<string, unknown>) {
+    if (mode !== "live") {
+      setLibraryError("Open the Linux app, then add the folder there. This page cannot see your disks.");
+      return;
+    }
+    setLibraryBusy(true);
+    setLibraryError(null);
+    try {
+      const res = await fetch(`${AGENT_ORIGIN}/api/library`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = (await res.json()) as {
+        error?: string;
+        games?: Game[];
+        warnings?: string[];
+        extraLibraries?: string[];
+      };
+      if (!res.ok) {
+        setLibraryError(data.error ?? "Could not add that folder.");
+        return;
+      }
+      setGames(data.games ?? []);
+      setWarnings(data.warnings ?? []);
+      setExtraLibraries(data.extraLibraries ?? []);
+      setLibraryPath("");
+    } catch {
+      setLibraryError("Lost contact with the ENHANCE app.");
+    } finally {
+      setLibraryBusy(false);
     }
   }
 
@@ -346,6 +385,53 @@ export function ForgeApp() {
                 </button>
               ))}
             </div>
+          </div>
+          <div className="mt-4 rounded-xl border border-line bg-surface p-3">
+            <p className="text-xs tracking-widest text-subtle">ADD A LIBRARY</p>
+            <p className="mt-1 text-sm text-muted">
+              If a disk is missing, choose the folder that contains steamapps.
+            </p>
+            <div className="mt-3 flex flex-col gap-2 sm:flex-row">
+              <input
+                value={libraryPath}
+                onChange={(event) => setLibraryPath(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") void sendLibrary({ path: libraryPath });
+                }}
+                placeholder="/mnt/games/SteamLibrary"
+                aria-label="Steam library folder"
+                className="h-11 min-w-0 flex-1 rounded-full border border-line bg-surface-2 px-4 text-sm outline-none"
+              />
+              <button
+                type="button"
+                disabled={libraryBusy}
+                onClick={() => void sendLibrary({ action: "pick" })}
+                className="h-11 rounded-full border border-line px-4 text-sm"
+              >
+                Choose folder
+              </button>
+              <button
+                type="button"
+                disabled={libraryBusy}
+                onClick={() => void sendLibrary({ path: libraryPath })}
+                className="h-11 rounded-full bg-accent px-4 text-sm font-semibold text-accent-fg"
+              >
+                Add
+              </button>
+            </div>
+            {libraryError ? <p className="mt-2 text-sm text-warn">{libraryError}</p> : null}
+            {extraLibraries.map((path) => (
+              <div key={path} className="mt-2 flex items-center gap-2">
+                <span className="min-w-0 flex-1 truncate font-mono text-xs text-muted">{path}</span>
+                <button
+                  type="button"
+                  className="h-9 rounded-full border border-line px-3 text-sm"
+                  onClick={() => void sendLibrary({ action: "remove", path })}
+                >
+                  Remove
+                </button>
+              </div>
+            ))}
           </div>
           <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-4" role="listbox" aria-label="Games">
             {visible.length === 0 ? (
