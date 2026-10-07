@@ -20,7 +20,7 @@ import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 VERSION = "1.0.0"
-BUILD = "20261004.5"
+BUILD = "20261007.1"
 PORT = int(os.environ.get("ENHANCE_PORT") or os.environ.get("FORGE_PORT") or "4775")
 MARKER_NAME = ".enhance-dlss5.json"
 LEGACY_MARKER = ".forge-dlss5.json"
@@ -308,6 +308,8 @@ def classify_api(imports: set[str]) -> str:
         return "dx12"
     if "d3d11.dll" in imports:
         return "dx11"
+    if "d3d10.dll" in imports:
+        return "dx10"
     if "d3d9.dll" in imports or "d3d8.dll" in imports:
         return "dx9"
     if "vulkan-1.dll" in imports:
@@ -696,6 +698,76 @@ def discover_libraries(roots: list[str]) -> tuple[list[str], list[str]]:
     return ordered, warnings
 
 
+def find_cover(appid: str) -> str | None:
+    if not appid.isdigit():
+        return None
+    preferred = (
+        "library_600x900.jpg",
+        "library_600x900_2x.jpg",
+        "library_hero.jpg",
+        "header.jpg",
+        "capsule_616x353.jpg",
+    )
+    legacy = [
+        os.path.join("appcache", "librarycache", f"{appid}_{name}") for name in preferred
+    ]
+    grids = (
+        f"{appid}p.jpg",
+        f"{appid}p.png",
+        f"{appid}p.webp",
+        f"{appid}_hero.jpg",
+        f"{appid}_hero.png",
+        f"{appid}.jpg",
+        f"{appid}.png",
+    )
+    for root in steam_roots():
+        folder = os.path.join(root, "appcache", "librarycache", appid)
+        if os.path.isdir(folder):
+            try:
+                names = os.listdir(folder)
+            except OSError:
+                names = []
+            lower = {name.lower(): name for name in names}
+            for want in preferred:
+                hit = lower.get(want)
+                if hit:
+                    path = os.path.join(folder, hit)
+                    if os.path.isfile(path) and os.path.getsize(path) > 400:
+                        return path
+            best = ""
+            best_size = 0
+            for name in names:
+                if not name.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
+                    continue
+                path = os.path.join(folder, name)
+                try:
+                    size = os.path.getsize(path)
+                except OSError:
+                    continue
+                if size > best_size:
+                    best, best_size = path, size
+            if best_size > 400:
+                return best
+        for rel in legacy:
+            path = os.path.join(root, rel)
+            if os.path.isfile(path) and os.path.getsize(path) > 400:
+                return path
+        userdata = os.path.join(root, "userdata")
+        if not os.path.isdir(userdata):
+            continue
+        try:
+            users = os.listdir(userdata)
+        except OSError:
+            continue
+        for user in users:
+            grid = os.path.join(userdata, user, "config", "grid")
+            for name in grids:
+                path = os.path.join(grid, name)
+                if os.path.isfile(path) and os.path.getsize(path) > 400:
+                    return path
+    return None
+
+
 def _walk_limited(root: str, max_depth: int):
     root = os.path.abspath(root)
     for dirpath, dirnames, filenames in os.walk(root):
@@ -779,7 +851,7 @@ def choose_exe(game_root: str, installdir: str) -> tuple[str | None, dict | None
                 except OSError:
                     pass
                 api = classify_api(info["imports"])
-                if api in {"dx12", "dx11"}:
+                if api in {"dx12", "dx11", "dx10", "dx9"}:
                     score += 8
                 candidates.append((score, path, info))
     except OSError:
@@ -792,7 +864,7 @@ def choose_exe(game_root: str, installdir: str) -> tuple[str | None, dict | None
     if api == "unknown":
         for _score, path, info in candidates[1:8]:
             other = classify_api(info["imports"])
-            if other in {"dx12", "dx11", "dx9", "vulkan"} and os.path.dirname(path) == os.path.dirname(best_path):
+            if other in {"dx12", "dx11", "dx10", "dx9", "vulkan"} and os.path.dirname(path) == os.path.dirname(best_path):
                 best_info = {**best_info, "imports": info["imports"]}
                 break
     return best_path, best_info
@@ -814,17 +886,15 @@ def load_marker(folder: str) -> tuple[str | None, dict | None]:
 def skip_reason(api: str, bits: int | None, exe: str | None, anticheat: str | None) -> str | None:
     parts: list[str] = []
     if bits == 32:
-        parts.append("32-bit executable. Only 64-bit games are packed.")
-    elif api == "dx9":
-        parts.append("DirectX 9. Only DX11 and DX12 are hooked.")
+        parts.append("32-bit executable. DLSS and this add-on are 64-bit only.")
     elif api == "vulkan":
-        parts.append("Vulkan. Only DX11 and DX12 are hooked.")
+        parts.append("Vulkan. Only DirectX 9, 10, 11, and 12 are hooked.")
     elif api == "opengl":
-        parts.append("OpenGL. Only DX11 and DX12 are hooked.")
+        parts.append("OpenGL. Only DirectX 9, 10, 11, and 12 are hooked.")
     elif not exe:
         parts.append("No Windows executable in the install folder.")
     elif api == "unknown":
-        parts.append("The executable does not import d3d11 or d3d12. You can still force a DX11 or DX12 hook.")
+        parts.append("The executable does not import d3d9, d3d10, d3d11, or d3d12. You can still force a hook.")
     if anticheat:
         label = {"easyanticheat": "Easy Anti-Cheat", "battleye": "BattlEye", "vac": "VAC"}.get(anticheat, anticheat)
         parts.append(f"{label} is in this folder. The hook can make the game refuse to start or ban the account.")
@@ -1117,15 +1187,18 @@ def find_game(appid: str) -> dict:
 
 
 def install_game(appid: str, hook: str, overwrite: bool, api_override: str | None, confirm_ac: bool) -> dict:
-    if hook not in {"dxgi", "d3d11", "d3d12"}:
-        raise RuntimeError("Hook must be dxgi, d3d11, or d3d12.")
+    if hook not in {"dxgi", "d3d9", "d3d10", "d3d11", "d3d12"}:
+        raise RuntimeError("Hook must be dxgi, d3d9, d3d10, d3d11, or d3d12.")
     game = find_game(appid)
     api = game["api"]
-    if api_override in {"dx11", "dx12"} and api == "unknown":
+    if api == "unknown" and api_override in {"dx9", "dx10", "dx11", "dx12"}:
         api = api_override
         log_line(f"API override: {api_override}")
-    if api not in {"dx11", "dx12"}:
-        raise RuntimeError(game["unsupportedReason"] or "Only DX11 and DX12 games can be installed.")
+    elif api == "unknown":
+        api = {"d3d9": "dx9", "d3d10": "dx10", "d3d11": "dx11", "d3d12": "dx12"}.get(hook, "dx11")
+        log_line(f"API override: {api}")
+    if api not in {"dx9", "dx10", "dx11", "dx12"}:
+        raise RuntimeError(game["unsupportedReason"] or "Only DirectX 9, 10, 11, and 12 games can be installed.")
     if game["bits"] not in {64, None}:
         raise RuntimeError("Only 64-bit games are supported.")
     if not game["exe"]:
@@ -1136,6 +1209,10 @@ def install_game(appid: str, hook: str, overwrite: bool, api_override: str | Non
         )
     folder = os.path.dirname(game["exe"])
     log_line(f"{game['name']} · {api.upper()} · 64-bit")
+    if api in {"dx9", "dx10"}:
+        log_line("This game did not ship DLSS. Press Home, set Hook Method to On Present, and set Require DLSS to Off.")
+    if api == "dx9" and hook != "d3d9":
+        log_line("DX9 needs d3d9.dll. The other hook names will not attach.")
     log_line(f"Executable folder: {folder}")
 
     local_addon = os.path.join(payload_dir(), ADDON_NAME)
@@ -1301,6 +1378,23 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/health":
             self._json(200, {"ok": True, "name": "enhance", "version": VERSION, "build": BUILD, "port": PORT})
             return
+        if path.startswith("/cover/"):
+            appid = path[len("/cover/") :]
+            found = find_cover(appid) if appid.isdigit() else None
+            if not found:
+                self._json(404, {"error": "No cover"})
+                return
+            data = open(found, "rb").read()
+            ext = found.lower().rsplit(".", 1)[-1]
+            kind = {"png": "image/png", "webp": "image/webp", "gif": "image/gif"}.get(ext, "image/jpeg")
+            self.send_response(200)
+            self._cors()
+            self.send_header("Content-Type", kind)
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "private, max-age=86400")
+            self.end_headers()
+            self.wfile.write(data)
+            return
         if path == "/api/games":
             self._json(200, scan_games())
             return
@@ -1324,7 +1418,7 @@ class Handler(BaseHTTPRequestHandler):
             hook = str(data.get("hook") or "dxgi")
             overwrite = bool(data.get("overwriteDlss"))
             override = data.get("apiOverride")
-            override = override if override in {"dx11", "dx12"} else None
+            override = override if override in {"dx9", "dx10", "dx11", "dx12"} else None
             confirm = bool(data.get("confirmAnticheat"))
             thread = threading.Thread(
                 target=run_job,
@@ -1413,7 +1507,7 @@ UI_HTML = r"""<!DOCTYPE html>
   <div>
     <p class="kicker">LINUX · STEAM · PROTON</p>
     <h1>ENHANCE</h1>
-    <p class="sub">Installed Steam games, with their covers. One click places ReShade 6.8.0, Lecram's DLSS 5 add-on, and the NVIDIA neural runtime into a DX11 or DX12 game.</p>
+    <p class="sub">Installed Steam games, with their covers. One click places ReShade 6.8.0, Lecram's DLSS 5 add-on, and the NVIDIA neural runtime into a DirectX 9, 10, 11, or 12 game.</p>
   </div>
   <button class="ghost" id="rescan" type="button">Rescan Steam</button>
 </header>
@@ -1436,17 +1530,29 @@ UI_HTML = r"""<!DOCTYPE html>
 const state = { games: [], filter: "all", q: "", id: null, hook: "dxgi", overwrite: false, ack: false, log: [], busy: false, geek: false };
 const listEl = document.getElementById("list");
 const detailEl = document.getElementById("detail");
-function ready(g) { return (g.api === "dx11" || g.api === "dx12") && g.bits !== 32 && g.exe; }
+function ready(g) { return (g.api === "dx9" || g.api === "dx10" || g.api === "dx11" || g.api === "dx12") && g.bits !== 32 && g.exe; }
 function skipped(g) { return !ready(g) || !!g.anticheat; }
 function launch(hook) { return 'WINEDLLOVERRIDES="' + hook + '=n,b" PROTON_ENABLE_NVAPI=1 %command%'; }
+function apiName(api) {
+  if (api === "dx9") return "DX9";
+  if (api === "dx10") return "DX10";
+  if (api === "dx11") return "DX11";
+  if (api === "dx12") return "DX12";
+  return api || "unknown";
+}
+function defaultHook(g) {
+  if (g && (g.hook === "dxgi" || g.hook === "d3d9" || g.hook === "d3d10" || g.hook === "d3d11" || g.hook === "d3d12")) return g.hook;
+  if (g && g.api === "dx9") return "d3d9";
+  return "dxgi";
+}
 function pills(g) {
-  const api = g.api === "dx11" || g.api === "dx12" ? g.api.toUpperCase() : (g.api || "unknown");
+  const api = apiName(g.api);
   const bits = g.bits ? g.bits + "-bit" : "bitness unknown";
   let html = '<span class="pill">' + api + '</span><span class="pill">' + bits + '</span>';
   if (g.hasDlss) html += '<span class="pill ok">ships DLSS</span>';
   if (g.installedByForge) html += '<span class="pill ok">ENHANCE installed</span>';
   if (g.anticheat) html += '<span class="pill bad">anti-cheat</span>';
-  if (g.unsupportedReason && g.api !== "dx11" && g.api !== "dx12") html += '<span class="pill warn">skipped</span>';
+  if (g.unsupportedReason && g.api !== "dx9" && g.api !== "dx10" && g.api !== "dx11" && g.api !== "dx12") html += '<span class="pill warn">skipped</span>';
   return html;
 }
 function visible() {
@@ -1459,27 +1565,64 @@ function visible() {
     return true;
   });
 }
-function coverSrc(appid) {
-  return /^[0-9]+$/.test(String(appid))
-    ? "https://cdn.cloudflare.steamstatic.com/steam/apps/" + appid + "/library_600x900.jpg"
-    : "";
+function coverList(appid) {
+  if (!/^[0-9]+$/.test(String(appid))) return [];
+  const cloud = "https://cdn.cloudflare.steamstatic.com/steam/apps/" + appid;
+  const akamai = "https://cdn.akamai.steamstatic.com/steam/apps/" + appid;
+  return [
+    "/cover/" + appid,
+    cloud + "/library_600x900.jpg",
+    cloud + "/library_600x900_2x.jpg",
+    akamai + "/library_600x900.jpg",
+    cloud + "/library_hero.jpg",
+    cloud + "/header.jpg",
+    akamai + "/header.jpg",
+    cloud + "/capsule_616x353.jpg",
+    cloud + "/hero_capsule.jpg",
+    cloud + "/capsule_231x87.jpg"
+  ];
+}
+function enhanceCover(img) {
+  const list = coverList(img.dataset.app);
+  const next = Number(img.dataset.i || 0) + 1;
+  if (next < list.length) {
+    img.dataset.i = String(next);
+    img.src = list[next];
+  } else {
+    img.style.display = "none";
+  }
+}
+function coverImg(appid, style) {
+  const list = coverList(appid);
+  if (!list.length) return "";
+  return '<img alt="" data-app="' + appid + '" data-i="0" referrerpolicy="no-referrer" src="' + list[0] + '"' + (style ? " style=\"" + style + "\"" : "") + ' onerror="enhanceCover(this)"/>';
 }
 function renderList() {
   const games = visible();
   if (!state.id && games[0]) state.id = games[0].appid;
   listEl.innerHTML = games.map(g => {
     return '<button class="card" role="option" data-id="' + g.appid + '" aria-selected="' + (g.appid === state.id) + '">' +
-      '<img alt="" src="' + coverSrc(g.appid) + '" onerror="this.style.display=\'none\'"/>' +
-      '<span class="badge">' + escapeHtml((g.api === "dx11" || g.api === "dx12") ? g.api.toUpperCase() : (g.api || "unknown")) + '</span>' +
+      coverImg(g.appid) +
+      '<span class="badge">' + escapeHtml(apiName(g.api)) + '</span>' +
       (g.installedByForge ? '<span class="badge right">Installed</span>' : '') +
       '<span class="shade"><span class="name">' + escapeHtml(g.name) + '</span></span></button>';
   }).join("") || '<p class="sub">No games in this filter.</p>';
-  listEl.querySelectorAll(".card").forEach(btn => btn.onclick = () => { state.id = btn.dataset.id; state.log = []; state.ack = false; render(); });
+  listEl.querySelectorAll(".card").forEach(btn => btn.onclick = () => {
+    state.id = btn.dataset.id;
+    state.hook = defaultHook(state.games.find(g => g.appid === state.id) || {});
+    state.log = [];
+    state.ack = false;
+    render();
+  });
 }
 function selected() { return state.games.find(g => g.appid === state.id) || null; }
 function escapeHtml(s) { return String(s).replace(/[&<>"]/g, c => ({'&':'&','<':'<','>':'>','"':'"'}[c])); }
 function notes(g) {
-  const dx = g.api === "dx11"
+  const dx = g.api === "dx9"
+    ? "DX9 uses d3d9.dll. dxgi.dll will not attach. Press Home, set Hook Method to On Present, and set Require DLSS to Off."
+    : g.api === "dx10"
+    ? "DX10 uses dxgi.dll first. If nothing attaches, switch the hook to d3d10.dll. Set Hook Method to On Present and Require DLSS to Off."
+    : g.api === "dx11"
     ? "DX11 uses dxgi.dll by default. If the game dies before the menu, switch the hook to d3d11.dll and copy the new launch option."
     : "DX12 uses dxgi.dll by default. A black screen usually means the hook should be d3d12.dll instead. Use a current Proton (Experimental, GE, or CachyOS proton-cachyos) so vkd3d-proton is new enough for the ReShade 6.8 add-on.";
   return [
@@ -1496,7 +1639,7 @@ function notes(g) {
 function renderDetail() {
   const g = selected();
   if (!g) { detailEl.innerHTML = "<p>Select a game.</p>"; return; }
-  const can = (g.api === "dx11" || g.api === "dx12" || g.api === "unknown") && g.bits !== 32 && g.exe;
+  const can = (g.api === "dx9" || g.api === "dx10" || g.api === "dx11" || g.api === "dx12" || g.api === "unknown") && g.bits !== 32 && g.exe;
   const files = [
     state.hook + ".dll — ReShade 6.8.0 add-on (ReShade64.dll renamed)",
     "renodx-dlss5.addon64 — Lecram DLSS 5 add-on v7.0.0-rc8",
@@ -1506,15 +1649,18 @@ function renderDetail() {
   if (!g.hasDlss || state.overwrite) files.push("nvngx_dlss.dll, nvngx_dlssg.dll, and sl.*.dll — Streamline runtime");
   else files.push("Existing DLSS / Streamline files are left alone");
   const why = skipped(g) ? (g.skipReason || g.unsupportedReason || "") : "";
+  const hooks = ["dxgi","d3d9","d3d10","d3d11","d3d12"];
   const hookHelp = {
-    dxgi: "Default for both DX11 and DX12. Proton loads it when the game creates a swap chain. Start here.",
+    dxgi: "Default for DX10, DX11, and DX12. It does not hook DX9.",
+    d3d9: "DX9 only. Start here for DirectX 9. Then set Hook Method to On Present and Require DLSS to Off.",
+    d3d10: "DX10 only. Use this if dxgi.dll does not attach.",
     d3d11: "DX11 only. Use this if the game closes before the menu while dxgi.dll is the hook.",
     d3d12: "DX12 only. Use this if the picture stays black but the ReShade overlay still opens with Home."
   };
   const basic = notes(g).slice(0, 2);
   const extra = notes(g).slice(2);
   detailEl.innerHTML =
-    '<div class="row" style="align-items:flex-start"><img alt="" src="' + coverSrc(g.appid) + '" style="width:72px;aspect-ratio:2/3;object-fit:cover;border-radius:8px" onerror="this.style.display=\'none\'"/>' +
+    '<div class="row" style="align-items:flex-start">' + coverImg(g.appid, "width:72px;aspect-ratio:2/3;object-fit:cover;border-radius:8px") +
     '<div><h2>' + escapeHtml(g.name) + '</h2>' +
     '<div class="pills" style="margin-top:8px">' + pills(g) + '</div></div></div>' +
     '<p class="mono" style="margin-top:10px">' + escapeHtml(g.installDir) + (g.exeRelative ? "\n" + escapeHtml(g.exeRelative) : "") + '</p>' +
@@ -1522,9 +1668,9 @@ function renderDetail() {
     '<div class="block"><div class="label">Hook</div>' +
     '<p class="sub">The hook is the same ReShade file under a different name. That name is the Windows DLL Proton swaps in. The launch option has to use the same name.</p>' +
     '<div class="chips">' +
-      ["dxgi","d3d11","d3d12"].map(h => '<button type="button" class="hook" data-hook="' + h + '" aria-pressed="' + (state.hook===h) + '">' + h + '.dll</button>').join("") +
+      hooks.map(h => '<button type="button" class="hook" data-hook="' + h + '" aria-pressed="' + (state.hook===h) + '">' + h + '.dll</button>').join("") +
     '</div>' +
-    '<ul class="notes">' + ["dxgi","d3d11","d3d12"].map(h => '<li' + (state.hook===h ? ' style="color:var(--fg)"' : '') + '><strong>' + h + '.dll</strong> — ' + escapeHtml(hookHelp[h]) + '</li>').join("") + '</ul></div>' +
+    '<ul class="notes">' + hooks.map(h => '<li' + (state.hook===h ? ' style="color:var(--fg)"' : '') + '><strong>' + h + '.dll</strong> — ' + escapeHtml(hookHelp[h]) + '</li>').join("") + '</ul></div>' +
     (g.anticheat ? '<div class="block check"><label><input id="ack" type="checkbox"' + (state.ack ? " checked" : "") + '/> I understand anti-cheat may ban or refuse to start</label></div>' : '') +
     '<div class="block row"><button class="primary" id="install" type="button"' + (can && !state.busy ? "" : " disabled") + '>' + (state.busy ? "Installing…" : (g.installedByForge ? "Reinstall" : "Install DLSS 5")) + '</button>' +
     (g.installedByForge ? '<button class="ghost" id="remove" type="button">Remove ENHANCE files</button>' : '') + '</div>' +
@@ -1568,7 +1714,9 @@ async function doInstall() {
   const g = selected(); if (!g) return;
   state.busy = true; render();
   const body = { appid: g.appid, hook: state.hook, overwriteDlss: state.overwrite, confirmAnticheat: state.ack };
-  if (g.api === "unknown") body.apiOverride = state.hook === "d3d11" ? "dx11" : "dx12";
+  if (g.api === "unknown") {
+    body.apiOverride = state.hook === "d3d9" ? "dx9" : state.hook === "d3d10" ? "dx10" : state.hook === "d3d12" ? "dx12" : "dx11";
+  }
   const res = await fetch("/api/install", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify(body) });
   if (!res.ok) { const err = await res.json(); state.busy = false; state.log = [err.error || "Could not start"]; render(); return; }
   poll();
@@ -1799,6 +1947,10 @@ def selftest() -> None:
     info = pe_info(path)
     assert info and info["bits"] == 64, info
     assert classify_api(info["imports"]) == "dx12", info
+    assert classify_api({"d3d10.dll"}) == "dx10"
+    assert classify_api({"d3d9.dll"}) == "dx9"
+    assert classify_api({"d3d11.dll", "d3d9.dll"}) == "dx11"
+    assert classify_api({"d3d12.dll", "d3d10.dll"}) == "dx12"
     assert launch_options("dxgi").startswith("WINEDLLOVERRIDES=")
 
     base = tempfile.mkdtemp()

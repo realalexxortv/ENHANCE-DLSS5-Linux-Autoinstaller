@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Check,
   ChevronLeft,
@@ -18,7 +18,8 @@ import {
   type Hook,
   apiLabel,
   compatibilityNotes,
-  coverUrl,
+  coverSources,
+  defaultHook,
   isReady,
   isSkipped,
   launchOptions,
@@ -35,7 +36,7 @@ const FILTERS: { id: Filter; label: string }[] = [
   { id: "skipped", label: "Skipped" },
 ];
 
-const HOOKS: Hook[] = ["dxgi", "d3d11", "d3d12"];
+const HOOKS: Hook[] = ["dxgi", "d3d9", "d3d10", "d3d11", "d3d12"];
 
 export function ForgeApp() {
   const [mode, setMode] = useState<Mode>("demo");
@@ -70,7 +71,7 @@ export function ForgeApp() {
 
   function selectGame(game: Game) {
     setSelectedId(game.appid);
-    setHook(game.hook ?? "dxgi");
+    setHook(defaultHook(game));
     setOverwrite(false);
     setAck(false);
     setLog(null);
@@ -146,7 +147,10 @@ export function ForgeApp() {
       overwriteDlss: overwrite,
       confirmAnticheat: ack,
     };
-    if (game.api === "unknown") body.apiOverride = hook === "d3d11" ? "dx11" : "dx12";
+    if (game.api === "unknown") {
+      body.apiOverride =
+        hook === "d3d9" ? "dx9" : hook === "d3d10" ? "dx10" : hook === "d3d12" ? "dx12" : hook === "d3d11" ? "dx11" : "dx11";
+    }
     try {
       const res = await fetch(`${AGENT_ORIGIN}/api/install`, {
         method: "POST",
@@ -223,7 +227,11 @@ export function ForgeApp() {
     selected &&
       selected.exe &&
       selected.bits !== 32 &&
-      (selected.api === "dx11" || selected.api === "dx12" || selected.api === "unknown") &&
+      (selected.api === "dx9" ||
+        selected.api === "dx10" ||
+        selected.api === "dx11" ||
+        selected.api === "dx12" ||
+        selected.api === "unknown") &&
       !busy,
   );
 
@@ -234,7 +242,7 @@ export function ForgeApp() {
           <p className="text-xs tracking-widest text-subtle">LINUX · STEAM · PROTON</p>
           <h1 className="mt-2 text-4xl font-semibold tracking-tight sm:text-5xl">ENHANCE</h1>
           <p className="mt-3 max-w-xl text-base text-muted">
-            Installed Steam games, with their covers. Pick a DX11 or DX12 title and ENHANCE packs
+            Installed Steam games, with their covers. Pick a DirectX 9, 10, 11, or 12 title and ENHANCE packs
             ReShade 6.8.0, Lecram's DLSS 5 add-on, and the NVIDIA neural runtime for Proton.
           </p>
         </div>
@@ -347,6 +355,7 @@ export function ForgeApp() {
                 <CoverCard
                   key={game.appid}
                   game={game}
+                  live={mode === "live"}
                   selected={selected?.appid === game.appid}
                   onSelect={() => selectGame(game)}
                 />
@@ -361,6 +370,7 @@ export function ForgeApp() {
           {selected ? (
             <Detail
               game={selected}
+              live={mode === "live"}
               hook={hook}
               overwrite={overwrite}
               ack={ack}
@@ -386,12 +396,48 @@ export function ForgeApp() {
   );
 }
 
+function GameCover({
+  appid,
+  live,
+  className,
+  onMiss,
+}: {
+  appid: string;
+  live: boolean;
+  className?: string;
+  onMiss: () => void;
+}) {
+  const sources = coverSources(appid, live);
+  const [index, setIndex] = useState(0);
+  useEffect(() => {
+    setIndex(0);
+  }, [appid, live]);
+  if (index >= sources.length) return null;
+  return (
+    <img
+      src={sources[index]}
+      alt=""
+      className={className}
+      referrerPolicy="no-referrer"
+      onError={() => {
+        setIndex((current) => {
+          const next = current + 1;
+          if (next >= sources.length) onMiss();
+          return next;
+        });
+      }}
+    />
+  );
+}
+
 function CoverCard({
   game,
+  live,
   selected,
   onSelect,
 }: {
   game: Game;
+  live: boolean;
   selected: boolean;
   onSelect: () => void;
 }) {
@@ -411,11 +457,11 @@ function CoverCard({
           {game.name.slice(0, 1)}
         </span>
       ) : (
-        <img
-          src={coverUrl(game)}
-          alt=""
+        <GameCover
+          appid={game.appid}
+          live={live}
           className="absolute inset-0 h-full w-full object-cover"
-          onError={() => setFailed(true)}
+          onMiss={() => setFailed(true)}
         />
       )}
       <span className="absolute top-2 left-2 rounded-full bg-bg/80 px-2 py-0.5 text-xs text-fg">
@@ -456,6 +502,7 @@ function Pills({ game }: { game: Game }) {
 
 function Detail({
   game,
+  live,
   hook,
   overwrite,
   ack,
@@ -473,6 +520,7 @@ function Detail({
   onCopy,
 }: {
   game: Game;
+  live: boolean;
   hook: Hook;
   overwrite: boolean;
   ack: boolean;
@@ -509,11 +557,11 @@ function Detail({
       </button>
       <div className="flex gap-3">
         {coverFailed ? null : (
-          <img
-            src={coverUrl(game)}
-            alt=""
+          <GameCover
+            appid={game.appid}
+            live={live}
             className="cover-frame w-16 shrink-0 rounded-md object-cover"
-            onError={() => setCoverFailed(true)}
+            onMiss={() => setCoverFailed(true)}
           />
         )}
         <div className="min-w-0">

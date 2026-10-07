@@ -1,5 +1,5 @@
-export type ApiKind = "dx11" | "dx12" | "dx9" | "vulkan" | "opengl" | "unknown";
-export type Hook = "dxgi" | "d3d11" | "d3d12";
+export type ApiKind = "dx9" | "dx10" | "dx11" | "dx12" | "vulkan" | "opengl" | "unknown";
+export type Hook = "dxgi" | "d3d9" | "d3d10" | "d3d11" | "d3d12";
 export type SteamKind = "native" | "flatpak" | "snap";
 export type Filter = "ready" | "all" | "installed" | "skipped";
 
@@ -204,10 +204,46 @@ export const DEMO_GAMES: Game[] = [
     steamKind: "native",
     unsupportedReason: "Detected vulkan. Vulkan and OpenGL are not hooked by this pack.",
   }),
+  sample({
+    appid: "367500",
+    name: "Dragon's Dogma: Dark Arisen",
+    library: "/home/you/.local/share/Steam",
+    installDir: "/home/you/.local/share/Steam/steamapps/common/DDDA",
+    exe: "/home/you/.local/share/Steam/steamapps/common/DDDA/DDDA.exe",
+    exeRelative: "DDDA.exe",
+    api: "dx9",
+    bits: 64,
+    hasDlss: false,
+    dlssPath: null,
+    anticheat: null,
+    installedByForge: false,
+    hook: null,
+    steamKind: "native",
+    unsupportedReason: null,
+  }),
+  sample({
+    appid: "409710",
+    name: "BioShock Remastered",
+    library: "/home/you/.local/share/Steam",
+    installDir: "/home/you/.local/share/Steam/steamapps/common/BioShock Remastered",
+    exe: "/home/you/.local/share/Steam/steamapps/common/BioShock Remastered/Build/Final/BioshockHD.exe",
+    exeRelative: "Build/Final/BioshockHD.exe",
+    api: "dx10",
+    bits: 64,
+    hasDlss: false,
+    dlssPath: null,
+    anticheat: null,
+    installedByForge: false,
+    hook: null,
+    steamKind: "native",
+    unsupportedReason: null,
+  }),
 ];
 
+const SUPPORTED: ApiKind[] = ["dx9", "dx10", "dx11", "dx12"];
+
 export function isReady(game: Game): boolean {
-  return (game.api === "dx11" || game.api === "dx12") && game.bits !== 32 && Boolean(game.exe);
+  return SUPPORTED.includes(game.api) && game.bits !== 32 && Boolean(game.exe);
 }
 
 export function isSkipped(game: Game): boolean {
@@ -225,13 +261,12 @@ export function skipReason(game: Game): string | null {
   if (!isSkipped(game)) return null;
   if (game.skipReason) return game.skipReason;
   const parts: string[] = [];
-  if (game.bits === 32) parts.push("32-bit executable. Only 64-bit games are packed.");
-  else if (game.api === "dx9") parts.push("DirectX 9. Only DX11 and DX12 are hooked.");
-  else if (game.api === "vulkan") parts.push("Vulkan. Only DX11 and DX12 are hooked.");
-  else if (game.api === "opengl") parts.push("OpenGL. Only DX11 and DX12 are hooked.");
+  if (game.bits === 32) parts.push("32-bit executable. DLSS and this add-on are 64-bit only.");
+  else if (game.api === "vulkan") parts.push("Vulkan. Only DirectX 9, 10, 11, and 12 are hooked.");
+  else if (game.api === "opengl") parts.push("OpenGL. Only DirectX 9, 10, 11, and 12 are hooked.");
   else if (!game.exe) parts.push("No Windows executable in the install folder.");
   else if (game.api === "unknown") {
-    parts.push("The executable does not import d3d11 or d3d12. You can still force a DX11 or DX12 hook.");
+    parts.push("The executable does not import d3d9, d3d10, d3d11, or d3d12. You can still force a hook.");
   }
   if (game.anticheat) {
     parts.push(
@@ -243,15 +278,53 @@ export function skipReason(game: Game): string | null {
   return `Skipped: ${parts.join(" ")}`;
 }
 
-export function coverUrl(game: Game): string {
-  return `https://cdn.cloudflare.steamstatic.com/steam/apps/${game.appid}/library_600x900.jpg`;
+export function coverSources(appid: string, live = false): string[] {
+  if (!/^\d+$/.test(appid)) return [];
+  const cloud = `https://cdn.cloudflare.steamstatic.com/steam/apps/${appid}`;
+  const akamai = `https://cdn.akamai.steamstatic.com/steam/apps/${appid}`;
+  const list = [
+    `${cloud}/library_600x900.jpg`,
+    `${cloud}/library_600x900_2x.jpg`,
+    `${akamai}/library_600x900.jpg`,
+    `${cloud}/library_hero.jpg`,
+    `${cloud}/header.jpg`,
+    `${akamai}/header.jpg`,
+    `${cloud}/capsule_616x353.jpg`,
+    `${cloud}/hero_capsule.jpg`,
+    `${cloud}/capsule_231x87.jpg`,
+  ];
+  return live ? [`${AGENT_ORIGIN}/cover/${appid}`, ...list] : list;
+}
+
+export function defaultHook(game: Game): Hook {
+  if (
+    game.hook === "dxgi" ||
+    game.hook === "d3d9" ||
+    game.hook === "d3d10" ||
+    game.hook === "d3d11" ||
+    game.hook === "d3d12"
+  ) {
+    return game.hook;
+  }
+  if (game.api === "dx9") return "d3d9";
+  return "dxgi";
 }
 
 export const HOOK_HELP: { hook: Hook; title: string; body: string }[] = [
   {
     hook: "dxgi",
     title: "dxgi.dll",
-    body: "Default for both DX11 and DX12. Proton loads it when the game creates a swap chain. Start here.",
+    body: "Default for DX10, DX11, and DX12. Proton loads it when the game creates a swap chain. It does not hook DX9.",
+  },
+  {
+    hook: "d3d9",
+    title: "d3d9.dll",
+    body: "DX9 only. Start here for DirectX 9. The game did not ship DLSS: in the add-on, set Hook Method to On Present and Require DLSS to Off.",
+  },
+  {
+    hook: "d3d10",
+    title: "d3d10.dll",
+    body: "DX10 only. Use this if dxgi.dll does not attach. Same add-on settings as DX9 if the game has no DLSS of its own.",
   },
   {
     hook: "d3d11",
@@ -291,9 +364,13 @@ export function packLines(game: Game, hook: Hook, overwrite: boolean): string[] 
 
 export function compatibilityNotes(game: Game, hook: Hook): string[] {
   const hookNote =
-    game.api === "dx11" || hook === "d3d11"
-      ? "This game looks like DX11. dxgi.dll is the right first hook. d3d12.dll will not attach."
-      : "This game looks like DX12. dxgi.dll is the right first hook. d3d11.dll will not attach. Use Proton Experimental, GE-Proton, or CachyOS proton-cachyos so vkd3d-proton is new enough for ReShade 6.8.";
+    game.api === "dx9" || hook === "d3d9"
+      ? "DX9 uses d3d9.dll. dxgi.dll will not attach. The game did not ship DLSS: press Home, set Hook Method to On Present, and set Require DLSS to Off."
+      : game.api === "dx10" || hook === "d3d10"
+        ? "DX10 uses dxgi.dll first. If nothing attaches, switch the hook to d3d10.dll and copy the new launch option. Set Hook Method to On Present and Require DLSS to Off."
+        : game.api === "dx11" || hook === "d3d11"
+          ? "This game looks like DX11. dxgi.dll is the right first hook. d3d12.dll will not attach."
+          : "This game looks like DX12. dxgi.dll is the right first hook. d3d11.dll will not attach. Use Proton Experimental, GE-Proton, or CachyOS proton-cachyos so vkd3d-proton is new enough for ReShade 6.8.";
   const store =
     game.steamKind === "flatpak"
       ? "This copy is the Flatpak version of Steam. ENHANCE still writes into that library. The launch option is the same."
@@ -314,9 +391,10 @@ export function compatibilityNotes(game: Game, hook: Hook): string[] {
 }
 
 export function apiLabel(api: ApiKind): string {
+  if (api === "dx9") return "DX9";
+  if (api === "dx10") return "DX10";
   if (api === "dx11") return "DX11";
   if (api === "dx12") return "DX12";
-  if (api === "dx9") return "DX9";
   if (api === "vulkan") return "Vulkan";
   if (api === "opengl") return "OpenGL";
   return "API unknown";
